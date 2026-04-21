@@ -28,6 +28,8 @@ interface OverlayItemRefs {
   container: HTMLDivElement;
   result: HTMLImageElement;
   badge: HTMLDivElement;
+  compactToggle: HTMLButtonElement;
+  details: HTMLDivElement;
   status: HTMLSpanElement;
   queue: HTMLSpanElement;
   toggle: HTMLButtonElement;
@@ -79,29 +81,38 @@ const STYLE_TEXT = `
 
   .mit-status-card {
     position: absolute;
-    top: 12px;
-    left: 12px;
-    max-width: min(280px, calc(100% - 24px));
-    padding: 10px 12px;
-    border-radius: 10px;
-    background: rgba(17, 24, 39, 0.9);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    color: #f9fafb;
-    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.22);
+    top: 10px;
+    left: 10px;
+    max-width: min(220px, calc(100% - 20px));
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(17, 24, 39, 0.56);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    color: rgba(249, 250, 251, 0.96);
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.14);
     pointer-events: auto;
-    backdrop-filter: blur(6px);
+    backdrop-filter: blur(10px) saturate(1.15);
+  }
+
+  .mit-status-card[data-compact="true"] {
+    max-width: none;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    backdrop-filter: none;
   }
 
   .mit-status-card[data-status="error"] {
-    background: rgba(127, 29, 29, 0.92);
+    background: rgba(127, 29, 29, 0.58);
     border-color: rgba(254, 202, 202, 0.18);
-    color: #fef2f2;
+    color: rgba(254, 242, 242, 0.98);
   }
 
   .mit-status-card[data-status="complete"] {
-    background: rgba(22, 101, 52, 0.92);
+    background: rgba(22, 101, 52, 0.58);
     border-color: rgba(220, 252, 231, 0.18);
-    color: #f0fdf4;
+    color: rgba(240, 253, 244, 0.98);
   }
 
   .mit-status-head {
@@ -111,22 +122,130 @@ const STYLE_TEXT = `
   }
 
   .mit-status-text {
-    font-size: 14px;
-    line-height: 1.35;
+    font-size: 12px;
+    line-height: 1.3;
     font-weight: 700;
   }
 
   .mit-status-queue {
-    margin-top: 6px;
-    font-size: 12px;
-    opacity: 0.88;
+    margin-top: 4px;
+    font-size: 10px;
+    opacity: 0.84;
   }
 
   .mit-status-actions {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 10px;
+    gap: 4px;
+    margin-top: 8px;
+  }
+
+  .mit-compact-toggle {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 999px;
+    background: rgba(17, 24, 39, 0.62);
+    color: #ffffff;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.16);
+    backdrop-filter: blur(10px) saturate(1.15);
+    font-size: 12px;
+    font-weight: 800;
+    line-height: 1;
+    position: relative;
+    overflow: hidden;
+    transition: opacity 180ms ease, transform 180ms ease, background 160ms ease;
+  }
+
+  .mit-compact-toggle[data-status="complete"] {
+    background: rgba(22, 101, 52, 0.76);
+  }
+
+  .mit-compact-toggle[data-status="error"] {
+    background: rgba(153, 27, 27, 0.78);
+  }
+
+  .mit-compact-toggle::after {
+    content: "";
+    position: absolute;
+    inset: 1px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    opacity: 0;
+  }
+
+  .mit-compact-toggle[data-status="processing"]::after,
+  .mit-compact-toggle[data-status="queued"]::after,
+  .mit-compact-toggle[data-status="pending"]::after {
+    opacity: 1;
+    border-top-color: rgba(255, 255, 255, 0.9);
+    border-right-color: rgba(255, 255, 255, 0.4);
+    border-bottom-color: rgba(255, 255, 255, 0.16);
+    border-left-color: rgba(255, 255, 255, 0.16);
+    animation: mit-spin 1.1s linear infinite;
+  }
+
+  .mit-status-card[data-status="complete"]:not([data-expanded="true"]) .mit-compact-toggle {
+    opacity: 0;
+    transform: scale(0.92);
+    pointer-events: none;
+  }
+
+  .mit-status-details {
+    display: block;
+  }
+
+  .mit-status-card[data-compact="true"] .mit-compact-toggle {
+    display: inline-flex;
+  }
+
+  .mit-status-card[data-compact="true"] .mit-status-details {
+    display: none;
+    margin-top: 6px;
+    max-width: min(220px, calc(100vw - 32px));
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(17, 24, 39, 0.58);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.14);
+    color: rgba(249, 250, 251, 0.96);
+    backdrop-filter: blur(10px) saturate(1.15);
+  }
+
+  .mit-status-card[data-compact="true"][data-status="complete"],
+  .mit-status-card[data-compact="true"][data-status="error"] {
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+
+  .mit-status-card[data-compact="true"][data-status="complete"] .mit-status-details {
+    background: rgba(22, 101, 52, 0.6);
+    color: rgba(240, 253, 244, 0.98);
+  }
+
+  .mit-status-card[data-compact="true"][data-status="error"] .mit-status-details {
+    background: rgba(127, 29, 29, 0.62);
+    color: rgba(254, 242, 242, 0.98);
+  }
+
+  .mit-status-card[data-compact="true"][data-expanded="true"] .mit-status-details {
+    display: block;
+  }
+
+  @keyframes mit-spin {
+    from {
+      transform: rotate(0deg);
+    }
+
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .mit-btn {
@@ -165,6 +284,27 @@ const STYLE_TEXT = `
   .mit-btn[data-utility="true"] {
     min-width: 40px;
     padding: 8px 10px;
+  }
+
+  .mit-status-card .mit-btn {
+    min-height: 26px;
+    padding: 5px 8px;
+    font-size: 10px;
+    border-radius: 999px;
+    border-color: rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.12);
+    color: inherit;
+    backdrop-filter: blur(8px);
+  }
+
+  .mit-status-card .mit-btn:hover {
+    background: rgba(255, 255, 255, 0.18);
+  }
+
+  .mit-status-card .mit-btn[data-tone="danger"] {
+    border-color: rgba(254, 202, 202, 0.18);
+    background: rgba(185, 28, 28, 0.24);
+    color: inherit;
   }
 
   .mit-btn:not([data-tone]),
@@ -415,6 +555,12 @@ const STYLE_TEXT = `
       font-size: 14px;
     }
 
+    .mit-compact-toggle {
+      width: 30px;
+      height: 30px;
+      font-size: 13px;
+    }
+
     .mit-dock {
       left: 12px;
       right: 12px;
@@ -436,6 +582,14 @@ const STYLE_TEXT = `
       top: auto;
       bottom: 8px;
       max-width: none;
+      padding: 8px 9px;
+    }
+
+    .mit-status-card[data-compact="true"] {
+      left: 8px;
+      right: auto;
+      top: 8px;
+      bottom: auto;
     }
   }
 `;
@@ -492,6 +646,8 @@ export class OverlayManager {
   private readonly itemRefs = new Map<string, OverlayItemRefs>();
 
   private viewModels = new Map<string, OverlayViewModel>();
+
+  private readonly expandedCompactItems = new Set<string>();
 
   private settingsOpen = false;
 
@@ -590,17 +746,23 @@ export class OverlayManager {
       if (!nextIds.has(id)) {
         refs.container.remove();
         this.itemRefs.delete(id);
+        this.expandedCompactItems.delete(id);
       }
     }
 
     for (const viewModel of viewModels) {
       const refs = this.itemRefs.get(viewModel.id) ?? this.createOverlayItem(viewModel.id);
       refs.badge.dataset.status = viewModel.status;
+      refs.badge.dataset.compact = "true";
+      refs.badge.dataset.expanded = String(this.expandedCompactItems.has(viewModel.id));
       refs.status.textContent = viewModel.message;
       refs.queue.textContent = viewModel.queuePosition ? `队列位置 #${viewModel.queuePosition}` : "";
       refs.queue.style.display = viewModel.queuePosition ? "block" : "none";
       refs.result.src = viewModel.resultUrl ?? "";
       refs.result.style.opacity = viewModel.showOriginal || !viewModel.resultUrl ? "0" : "1";
+      refs.compactToggle.dataset.status = viewModel.status;
+      refs.compactToggle.title = viewModel.message;
+      refs.compactToggle.setAttribute("aria-label", viewModel.message);
       refs.toggle.textContent = viewModel.showOriginal ? "显示译图" : "显示原图";
       refs.toggle.hidden = !viewModel.resultUrl;
       refs.retry.hidden = !viewModel.canRetry;
@@ -845,6 +1007,14 @@ export class OverlayManager {
     const badge = document.createElement("div");
     badge.className = "mit-status-card";
 
+    const compactToggle = document.createElement("button");
+    compactToggle.type = "button";
+    compactToggle.className = "mit-compact-toggle";
+    compactToggle.textContent = "翻";
+
+    const details = document.createElement("div");
+    details.className = "mit-status-details";
+
     const head = document.createElement("div");
     head.className = "mit-status-head";
 
@@ -869,9 +1039,19 @@ export class OverlayManager {
     retry.addEventListener("click", () => this.callbacks.onRetryImage(id));
     cancel.addEventListener("click", () => this.callbacks.onCancelImage(id));
     ignore.addEventListener("click", () => this.callbacks.onIgnoreImage(id));
+    compactToggle.addEventListener("click", () => {
+      if (this.expandedCompactItems.has(id)) {
+        this.expandedCompactItems.delete(id);
+      } else {
+        this.expandedCompactItems.clear();
+        this.expandedCompactItems.add(id);
+      }
+      this.renderImages(Array.from(this.viewModels.values()));
+    });
 
     actions.append(toggle, retry, cancel, ignore);
-    badge.append(head, queue, actions);
+    details.append(head, queue, actions);
+    badge.append(compactToggle, details);
     container.append(result, badge);
     this.overlayLayer.appendChild(container);
 
@@ -879,6 +1059,8 @@ export class OverlayManager {
       container,
       result,
       badge,
+      compactToggle,
+      details,
       status,
       queue,
       toggle,

@@ -109,6 +109,7 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 
 - 如果页面是 `https://`，而你的翻译服务是 `http://`，普通浏览器 `fetch` 可能被 mixed content 策略阻止。
 - 脚本会优先尝试 `fetch`，失败后自动回退到 Tampermonkey 的 `GM_xmlhttpRequest`。
+- 在 iOS Safari + Stay 这类不支持 `GM_xmlhttpRequest` 流式响应的环境里，脚本会进一步退回到非流式图片接口。这样通常还能拿到最终结果，但不会显示完整的逐步进度。
 - 即便如此，公网部署仍然强烈建议使用 HTTPS 反向代理，例如 Nginx、Caddy 或 Cloudflare Tunnel。
 
 ## Troubleshooting
@@ -118,7 +119,7 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - `连接成功但图片不翻译`
   - 先确认服务端是否真的能处理该语言/翻译器组合，再检查服务器日志。
 - `GM stream transport is unavailable in this browser`
-  - 升级 Tampermonkey，或改用最新桌面版 Chrome / Edge / Firefox。
+  - 在最新版脚本里会自动切到兼容模式；如果仍失败，优先检查 Stay 版本、服务端 HTTPS 配置和跨域设置。
 - `Failed to fetch the source image`
   - 目标站点可能有更严格的防盗链策略，优先尝试登录后再刷新页面。
 - `服务器返回 401`

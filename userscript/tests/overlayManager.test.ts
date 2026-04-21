@@ -4,7 +4,7 @@ import { DEFAULT_SETTINGS } from "../src/config";
 import { OverlayManager } from "../src/core/overlayManager";
 
 describe("OverlayManager", () => {
-  it("syncs overlay position with image bounds", () => {
+  it("syncs overlay position with image bounds and toggles compact details", () => {
     const image = document.createElement("img");
     image.getBoundingClientRect = () =>
       ({
@@ -42,10 +42,18 @@ describe("OverlayManager", () => {
     ]);
 
     const overlayItem = overlay.shadowRoot.querySelector(".mit-overlay-item") as HTMLDivElement;
+    const badge = overlay.shadowRoot.querySelector(".mit-status-card") as HTMLDivElement;
+    const compactToggle = overlay.shadowRoot.querySelector(".mit-compact-toggle") as HTMLButtonElement;
     expect(overlayItem.style.left).toBe("24px");
     expect(overlayItem.style.top).toBe("48px");
     expect(overlayItem.style.width).toBe("360px");
     expect(overlayItem.style.height).toBe("520px");
+    expect(badge.dataset.compact).toBe("true");
+    expect(badge.dataset.expanded).toBe("false");
+    expect(compactToggle.dataset.status).toBe("complete");
+
+    compactToggle.click();
+    expect(badge.dataset.expanded).toBe("true");
 
     overlay.destroy();
   });

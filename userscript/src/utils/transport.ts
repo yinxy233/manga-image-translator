@@ -195,11 +195,20 @@ export class TransportClient {
   async translateImage(options: TranslateImageOptions): Promise<Blob> {
     try {
       return await this.translateImageWithFetch(options);
-    } catch (error) {
-      if (!shouldFallback(error)) {
-        throw error;
+    } catch (fetchError) {
+      if (!shouldFallback(fetchError)) {
+        throw fetchError;
       }
-      return this.translateImageWithGM(options);
+
+      try {
+        return await this.translateImageWithGMStream(options);
+      } catch (gmStreamError) {
+        if (!shouldFallback(gmStreamError)) {
+          throw gmStreamError;
+        }
+
+        return this.translateImageWithGMBlob(options);
+      }
     }
   }
 
@@ -292,7 +301,7 @@ export class TransportClient {
     return parseTranslationStream(response.body, options.onEvent, options.signal);
   }
 
-  private async translateImageWithGM(options: TranslateImageOptions): Promise<Blob> {
+  private async translateImageWithGMStream(options: TranslateImageOptions): Promise<Blob> {
     return new Promise<Blob>((resolve, reject) => {
       let streamStarted = false;
 
@@ -336,6 +345,49 @@ export class TransportClient {
         },
         onerror: () => reject(new Error("GM transport failed to reach the translation server.")),
         ontimeout: () => reject(new Error("GM transport timed out."))
+      });
+
+      options.signal?.addEventListener("abort", () => request.abort(), { once: true });
+    });
+  }
+
+  private async translateImageWithGMBlob(options: TranslateImageOptions): Promise<Blob> {
+    options.onEvent({
+      code: 1,
+      payload: new Uint8Array(),
+      text: "兼容模式：等待完整结果"
+    });
+
+    return new Promise<Blob>((resolve, reject) => {
+      const request = this.gmRequest({
+        method: "POST",
+        url: joinServerUrl(options.settings.serverBaseUrl, "/translate/with-form/image"),
+        headers: buildHeaders(options.settings),
+        data: createTranslationFormData(options.imageBlob, options.fileName, options.settings),
+        responseType: "blob",
+        fetch: true,
+        onload: (response) => {
+          if (response.status >= 400) {
+            reject(
+              new HttpStatusError(response.status, response.responseText || `HTTP ${response.status}`)
+            );
+            return;
+          }
+
+          if (response.response instanceof Blob) {
+            resolve(response.response);
+            return;
+          }
+
+          if (response.response instanceof ArrayBuffer) {
+            resolve(new Blob([response.response], { type: "image/png" }));
+            return;
+          }
+
+          reject(new Error("GM blob transport did not return an image response."));
+        },
+        onerror: () => reject(new Error("GM blob transport failed to reach the translation server.")),
+        ontimeout: () => reject(new Error("GM blob transport timed out."))
       });
 
       options.signal?.addEventListener("abort", () => request.abort(), { once: true });
