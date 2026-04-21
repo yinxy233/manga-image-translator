@@ -1,4 +1,5 @@
 import io
+import logging
 import os
 import secrets
 import shutil
@@ -13,17 +14,21 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from fastapi import FastAPI, Request, HTTPException, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 from manga_translator import Config
+from server.auth import validate_public_api_key, is_protected_public_path
 from server.instance import ExecutorInstance, executor_instances
 from server.myqueue import task_queue
 from server.request_extraction import get_ctx, while_streaming, TranslateRequest, BatchTranslateRequest, get_batch_ctx
+from server.settings import ServerSettings, load_server_settings, resolve_app_version
 from server.to_json import to_translation, TranslationResponse
 
-app = FastAPI()
+logger = logging.getLogger(__name__)
+server_settings = ServerSettings(public_api_key=None, version=resolve_app_version())
+app = FastAPI(version=server_settings.version)
 nonce = None
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -42,12 +47,45 @@ app.add_middleware(
 if RESULT_ROOT.exists():
     app.mount("/result", StaticFiles(directory=str(RESULT_ROOT)), name="result")
 
+
+@app.middleware("http")
+async def public_api_key_middleware(request: Request, call_next):
+    """Protect selected public endpoints with an optional API key.
+
+    Args:
+        request: Incoming FastAPI request.
+        call_next: FastAPI middleware continuation.
+
+    Returns:
+        The downstream response when authentication succeeds or is not required.
+    """
+    if is_protected_public_path(request.url.path):
+        try:
+            validate_public_api_key(request, server_settings)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    return await call_next(request)
+
 @app.post("/register", response_description="no response", tags=["internal-api"])
 async def register_instance(instance: ExecutorInstance, req: Request, req_nonce: str = Header(alias="X-Nonce")):
     if req_nonce != nonce:
         raise HTTPException(401, detail="Invalid nonce")
     instance.ip = req.client.host
     executor_instances.register(instance)
+
+
+@app.get("/health", tags=["api"])
+async def health() -> dict[str, int | str]:
+    """Return the public health status for remote clients.
+
+    Returns:
+        A compact status payload used by the userscript and remote probes.
+    """
+    return {
+        "status": "ok",
+        "version": server_settings.version,
+        "queue_size": len(task_queue.queue),
+    }
 
 def transform_to_image(ctx):
     # 检查是否使用占位符（在web模式下final.png保存后会设置此标记）
@@ -391,6 +429,8 @@ if __name__ == '__main__':
     from args import parse_arguments
 
     args = parse_arguments()
+    server_settings = load_server_settings(args.api_key)
+    app.version = server_settings.version
     args.start_instance = True
     proc = prepare(args)
     print("Nonce: "+nonce)

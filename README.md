@@ -159,6 +159,8 @@ The following examples may not be frequently updated and may not represent the e
 Official demo site (maintained by zyddnys): <https://touhou.ai/imgtrans/>\
 Browser script (maintained by QiroNT): <https://greasyfork.org/scripts/437569>
 
+- Remote userscript project in this repository: [userscript/README.md](userscript/README.md)
+
 - Note: If the online version is inaccessible, it might be due to Google GCP restarting the server. Please wait a moment for the service to restart.
 - The online version uses the latest version from the main branch.
 
@@ -337,6 +339,12 @@ Read the openapi documentation at: `127.0.0.1:8000/docs`
 
 [FastAPI-html](https://cfbed.1314883.xyz/file/1741386061808_FastAPI%20-%20Swagger%20UI.html)
 
+Additional public endpoints:
+
+- `GET /health` returns `status`, `version`, and `queue_size`
+- Public API protection can be enabled with `--api-key` or `MT_PUBLIC_API_KEY`
+- The bundled Tampermonkey userscript is documented in [userscript/README.md](userscript/README.md)
+
 ### Config-help Mode
 ```bash
 python -m manga_translator config-help
@@ -442,6 +450,7 @@ shared              run in API mode
 --host HOST         Host of the API service (default: 127.0.0.1)
 --port PORT         Port of the API service (default: 5003)
 --nonce NONCE       Nonce used to secure internal API server communication, set to "None" to disable
+--api-key API_KEY   Optional API key for protecting public translation endpoints
 --report REPORT     Report to server to register instance (default: None)
 --models-ttl MODELS_TTL  TTL of models in memory in seconds (0 means forever)
 ```
@@ -453,6 +462,7 @@ shared              run in API mode
 --port PORT           Port number (default: 8000)
 --start-instance      Whether an instance of the translator should be started automatically
 --nonce NONCE         Nonce used to secure internal Web Server communication, set to "None" to disable
+--api-key API_KEY     Optional API key for protecting public translation endpoints
 --models-ttl MODELS_TTL  Time in seconds to keep models in memory after last use (0 means forever)
 ```
 
