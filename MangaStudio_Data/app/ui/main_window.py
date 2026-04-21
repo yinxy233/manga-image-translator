@@ -3076,6 +3076,7 @@ class TranslatorStudioApp(QMainWindow):
             "CUSTOM_OPENAI_API_KEY=ollama",
             "CUSTOM_OPENAI_MODEL=",
             "CUSTOM_OPENAI_API_BASE=http://localhost:11434/v1",
+            "CUSTOM_OPENAI_DISABLE_REASONING=",
         ]
 
         try:

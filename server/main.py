@@ -241,12 +241,44 @@ async def manual():
 def generate_nonce():
     return secrets.token_hex(16)
 
-def start_translator_client_proc(host: str, port: int, nonce: str, params: Namespace):
+def get_internal_instance_host(host: str) -> str:
+    """Return the host used for local translator instance traffic.
+
+    Args:
+        host: Public bind host configured for the web server.
+
+    Returns:
+        A loopback-safe host for in-process service calls.
+    """
+    if host in {"0.0.0.0", "::", ""}:
+        # 内部翻译实例只需要本机访问，不能把监听通配地址当成客户端目标地址。
+        return "127.0.0.1"
+    return host
+
+
+def start_translator_client_proc(
+    host: str,
+    port: int,
+    nonce: str | None,
+    params: Namespace,
+) -> subprocess.Popen[bytes]:
+    """Start the internal translator instance for the web server.
+
+    Args:
+        host: Public bind host configured for the web server.
+        port: Port assigned to the internal translator instance.
+        nonce: Nonce used for internal service authentication.
+        params: Parsed CLI arguments.
+
+    Returns:
+        The spawned translator process handle.
+    """
+    internal_host = get_internal_instance_host(host)
     cmds = [
         sys.executable,
         '-m', 'manga_translator',
         'shared',
-        '--host', host,
+        '--host', internal_host,
         '--port', str(port),
         '--nonce', nonce,
     ]
@@ -267,7 +299,7 @@ def start_translator_client_proc(host: str, port: int, nonce: str, params: Names
     base_path = os.path.dirname(os.path.abspath(__file__))
     parent = os.path.dirname(base_path)
     proc = subprocess.Popen(cmds, cwd=parent)
-    executor_instances.register(ExecutorInstance(ip=host, port=port))
+    executor_instances.register(ExecutorInstance(ip=internal_host, port=port))
 
     def handle_exit_signals(signal, frame):
         proc.terminate()

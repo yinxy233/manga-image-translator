@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 
 from ..config import TranslatorConfig
@@ -9,9 +11,15 @@ except ImportError:
     openai = None
 import asyncio
 import time
-from typing import List
+from typing import Any, List
 from .common import CommonTranslator, VALID_LANGUAGES
-from .keys import CUSTOM_OPENAI_API_KEY, CUSTOM_OPENAI_API_BASE, CUSTOM_OPENAI_MODEL, CUSTOM_OPENAI_MODEL_CONF
+from .keys import (
+    CUSTOM_OPENAI_API_BASE,
+    CUSTOM_OPENAI_API_KEY,
+    CUSTOM_OPENAI_DISABLE_REASONING,
+    CUSTOM_OPENAI_MODEL,
+    CUSTOM_OPENAI_MODEL_CONF,
+)
 
 
 class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
@@ -41,22 +49,29 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         ConfigGPT.__init__(self, config_key=_CONFIG_KEY)
         self.model = model
         CommonTranslator.__init__(self)
-        self.client = openai.AsyncOpenAI(api_key=api_key or CUSTOM_OPENAI_API_KEY or "ollama") # required, but unused for ollama
-        self.client.base_url = api_base or CUSTOM_OPENAI_API_BASE
+        resolved_api_key = api_key or CUSTOM_OPENAI_API_KEY or "ollama"
+        resolved_api_base = api_base or CUSTOM_OPENAI_API_BASE
+
+        self.client = openai.AsyncOpenAI(api_key=resolved_api_key) # required, but unused for ollama
+        self.client.base_url = resolved_api_base
         self.token_count = 0
         self.token_count_last = 0
+        self._disable_reasoning = CUSTOM_OPENAI_DISABLE_REASONING
 
     def parse_args(self, args: TranslatorConfig):
         self.config = args.chatgpt_config
 
 
-    def extract_capture_groups(self, text, regex=r"(.*)"):
+    def extract_capture_groups(self, text: str, regex: str = r"(.*)") -> str:
         """
         Extracts all capture groups from matches and concatenates them into a single string.
-        
-        :param text: The multi-line text to search.
-        :param regex: The regex pattern with capture groups.
-        :return: A concatenated string of all matched groups.
+
+        Args:
+            text: The multi-line text to search.
+            regex: The regex pattern with capture groups.
+
+        Returns:
+            A concatenated string of all matched groups.
         """
         pattern = re.compile(regex, re.DOTALL)  # DOTALL to match across multiple lines
         matches = pattern.findall(text)  # Find all matches
@@ -65,8 +80,122 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         extracted_text = "\n".join(
             "\n".join(m) if isinstance(m, tuple) else m for m in matches
         )
-        
-        return extracted_text.strip() if extracted_text else None
+
+        return extracted_text.strip() if extracted_text else ""
+
+    def _normalize_message_text(self, value: Any) -> str:
+        """Normalizes response payload fragments into plain text.
+
+        Args:
+            value: Raw message field value returned by the OpenAI-compatible API.
+
+        Returns:
+            A best-effort plain text string.
+        """
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts = [self._normalize_message_text(item) for item in value]
+            return "".join(part for part in parts if part)
+        if isinstance(value, dict):
+            for key in ("text", "content", "reasoning", "reasoning_content", "thinking"):
+                nested_value = value.get(key)
+                if nested_value is not None:
+                    return self._normalize_message_text(nested_value)
+            return ""
+
+        text_value = getattr(value, "text", None)
+        if text_value is not None:
+            return self._normalize_message_text(text_value)
+
+        content_value = getattr(value, "content", None)
+        if content_value is not None and content_value is not value:
+            return self._normalize_message_text(content_value)
+
+        return ""
+
+    def _get_message_field(self, message: Any, field_name: str) -> str:
+        """Returns a normalized text value from a response message field.
+
+        Args:
+            message: Message object returned by the OpenAI-compatible API.
+            field_name: Field name to inspect.
+
+        Returns:
+            A normalized string. Empty string means the field is missing or empty.
+        """
+        if isinstance(message, dict):
+            return self._normalize_message_text(message.get(field_name))
+        return self._normalize_message_text(getattr(message, field_name, None))
+
+    def _safe_dump(self, value: Any) -> Any:
+        """Builds a debug-friendly dump for unexpected response payloads.
+
+        Args:
+            value: Response object or nested message payload.
+
+        Returns:
+            A serializable representation when available.
+        """
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            try:
+                return model_dump()
+            except Exception:
+                return str(value)
+        return value
+
+    def _extract_response_text(self, message: Any) -> str:
+        """Extracts the usable text body from a model response.
+
+        Args:
+            message: Response message returned by the OpenAI-compatible API.
+
+        Returns:
+            The text that should be parsed as translation output.
+
+        Raises:
+            ValueError: If the response does not contain any usable text field.
+        """
+        for field_name in ("content", "reasoning_content", "reasoning", "thinking"):
+            text = self._get_message_field(message, field_name).strip()
+            if text:
+                if field_name != "content":
+                    self.logger.warning(
+                        "Response content is empty, fallback to message.%s for parsing.",
+                        field_name,
+                    )
+                return text
+
+        raise ValueError(
+            "OpenAI-compatible response does not contain usable text. "
+            f"message={self._safe_dump(message)}"
+        )
+
+    def _build_request_kwargs(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+        """Builds request arguments for the OpenAI-compatible chat API.
+
+        Args:
+            messages: Chat messages to send to the model.
+
+        Returns:
+            Request keyword arguments for `chat.completions.create`.
+        """
+        request_kwargs: dict[str, Any] = {
+            "model": self.model or CUSTOM_OPENAI_MODEL,
+            "messages": messages,
+            "max_tokens": self._MAX_TOKENS // 2,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+        }
+
+        # 业务意图：对部分 Ollama thinking 模型提供显式开关，避免只返回 reasoning 字段导致翻译流程拿不到正文。
+        if self._disable_reasoning:
+            request_kwargs["extra_body"] = {"reasoning_effort": "none"}
+
+        return request_kwargs
 
     def _assemble_prompts(self, from_lang: str, to_lang: str, queries: List[str]):
         prompt = ''
@@ -167,6 +296,13 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
             # Use regex to extract response 
             response=self.extract_capture_groups(response, rf"{self.rgx_capture}")
 
+            if not response:
+                raise ValueError(
+                    "OpenAI-compatible API returned an empty text response after capture extraction. "
+                    "If you are using an Ollama thinking model, enable CUSTOM_OPENAI_DISABLE_REASONING=1 "
+                    "or switch to a non-thinking model."
+                )
+
 
             # Sometimes it will return line like "<|9>demo", and we need to fix it.
             def add_pipe(match):
@@ -225,20 +361,17 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
 
         messages.append({'role': 'user', 'content': prompt})
 
-        response = await self.client.chat.completions.create(
-            model=self.model or CUSTOM_OPENAI_MODEL,
-            messages=messages,
-            max_tokens=self._MAX_TOKENS // 2,
-            temperature=self.temperature,
-            top_p=self.top_p,
-        )
+        response = await self.client.chat.completions.create(**self._build_request_kwargs(messages))
+        message = response.choices[0].message
+        response_text = self._extract_response_text(message)
 
         self.logger.debug('\n-- GPT Response (raw) --')
-        self.logger.debug(response.choices[0].message.content)
+        self.logger.debug(response_text)
         self.logger.debug('------------------------\n')
 
 
-        self.token_count += response.usage.total_tokens
-        self.token_count_last = response.usage.total_tokens
+        total_tokens = getattr(getattr(response, "usage", None), "total_tokens", 0) or 0
+        self.token_count += total_tokens
+        self.token_count_last = total_tokens
 
-        return response.choices[0].message.content
+        return response_text
