@@ -101,4 +101,46 @@ describe("TransportClient", () => {
     expect(gmRequest.mock.calls[0]?.[0]?.responseType).toBe("stream");
     expect(gmRequest.mock.calls[1]?.[0]?.responseType).toBe("blob");
   });
+
+  it("serializes GM uploads as explicit multipart payloads", async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+
+    const gmRequest = vi.fn(
+      ((details: GMRequestDetails<ReadableStream<Uint8Array>>) => {
+        queueMicrotask(() => {
+          details.onloadstart?.({
+            status: 200,
+            response: createStreamResponse()
+          });
+        });
+        return {
+          abort: vi.fn()
+        };
+      }) as unknown as (details: GMRequestDetails<unknown>) => GMRequestHandle
+    );
+
+    const transport = new TransportClient({ fetchImpl, gmRequest });
+    await transport.translateImage({
+      imageBlob: new Blob(["test-image"], { type: "image/png" }),
+      fileName: "page.png",
+      settings: DEFAULT_SETTINGS,
+      onEvent: vi.fn()
+    });
+
+    const firstRequest = gmRequest.mock.calls[0]?.[0];
+    const contentType = firstRequest?.headers?.["Content-Type"] ?? "";
+    const payload = firstRequest?.data as ArrayBuffer;
+    const boundary = contentType.match(/boundary=(.+)$/)?.[1] ?? "";
+    const payloadText = new TextDecoder().decode(new Uint8Array(payload));
+
+    expect(contentType).toMatch(/^multipart\/form-data; boundary=/);
+    expect(payload).toBeInstanceOf(ArrayBuffer);
+    expect(firstRequest?.data).not.toBeInstanceOf(FormData);
+    expect(payload.byteLength).toBeGreaterThan("test-image".length);
+    expect(payloadText.startsWith(`--${boundary}\r\n`)).toBe(true);
+    expect(payloadText).toContain('name="image"');
+    expect(payloadText).toContain('name="config"');
+  });
 });

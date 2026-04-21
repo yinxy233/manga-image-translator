@@ -83,6 +83,66 @@ function createTranslationFormData(blob: Blob, fileName: string, settings: Users
   return formData;
 }
 
+function escapeMultipartHeaderValue(value: string): string {
+  return value.replace(/[\r\n"]/g, "_");
+}
+
+function createMultipartBoundary(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `----mit-boundary-${crypto.randomUUID().replace(/-/g, "")}`;
+  }
+
+  return `----mit-boundary-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function blobToArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
+  if (typeof blob.arrayBuffer === "function") {
+    return blob.arrayBuffer();
+  }
+
+  return new Response(blob).arrayBuffer();
+}
+
+async function createGMTranslationPayload(
+  blob: Blob,
+  fileName: string,
+  settings: UserscriptSettings
+): Promise<{ data: ArrayBuffer; headers: Record<string, string> }> {
+  const boundary = createMultipartBoundary();
+  const sanitizedFileName = escapeMultipartHeaderValue(fileName || "image.png");
+  const encodedFileName = encodeURIComponent(fileName || "image.png");
+  const config = buildTranslationConfig(settings);
+  const contentType = blob.type || "application/octet-stream";
+  const encoder = new TextEncoder();
+  const prefix = encoder.encode(
+    `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="image"; filename="${sanitizedFileName}"; filename*=UTF-8''${encodedFileName}\r\n` +
+      `Content-Type: ${contentType}\r\n\r\n`
+  );
+  const imageBytes = new Uint8Array(await blobToArrayBuffer(blob));
+  const infix = encoder.encode(
+    `\r\n--${boundary}\r\n` +
+      'Content-Disposition: form-data; name="config"\r\n' +
+      "Content-Type: application/json; charset=utf-8\r\n\r\n" +
+      config
+  );
+  const suffix = encoder.encode(`\r\n--${boundary}--\r\n`);
+  const payload = new Uint8Array(prefix.length + imageBytes.length + infix.length + suffix.length);
+
+  payload.set(prefix, 0);
+  payload.set(imageBytes, prefix.length);
+  payload.set(infix, prefix.length + imageBytes.length);
+  payload.set(suffix, prefix.length + imageBytes.length + infix.length);
+
+  return {
+    data: payload.buffer,
+    headers: {
+      ...buildHeaders(settings),
+      "Content-Type": `multipart/form-data; boundary=${boundary}`
+    }
+  };
+}
+
 async function toHttpStatusError(response: Response): Promise<HttpStatusError> {
   const body = await response.text().catch(() => "");
   const message = body || `HTTP ${response.status}`;
@@ -303,51 +363,58 @@ export class TransportClient {
 
   private async translateImageWithGMStream(options: TranslateImageOptions): Promise<Blob> {
     return new Promise<Blob>((resolve, reject) => {
-      let streamStarted = false;
+      void (async () => {
+        const multipartPayload = await createGMTranslationPayload(
+          options.imageBlob,
+          options.fileName,
+          options.settings
+        );
+        let streamStarted = false;
 
-      const request = this.gmRequest({
-        method: "POST",
-        url: joinServerUrl(options.settings.serverBaseUrl, "/translate/with-form/image/stream"),
-        headers: buildHeaders(options.settings),
-        data: createTranslationFormData(options.imageBlob, options.fileName, options.settings),
-        responseType: "stream",
-        fetch: true,
-        onloadstart: async (response) => {
-          streamStarted = true;
+        const request = this.gmRequest({
+          method: "POST",
+          url: joinServerUrl(options.settings.serverBaseUrl, "/translate/with-form/image/stream"),
+          headers: multipartPayload.headers,
+          data: multipartPayload.data,
+          responseType: "stream",
+          fetch: true,
+          onloadstart: async (response) => {
+            streamStarted = true;
 
-          if (response.status >= 400) {
-            reject(
-              new HttpStatusError(response.status, response.responseText || `HTTP ${response.status}`)
-            );
-            return;
-          }
+            if (response.status >= 400) {
+              reject(
+                new HttpStatusError(response.status, response.responseText || `HTTP ${response.status}`)
+              );
+              return;
+            }
 
-          if (!(response.response instanceof ReadableStream)) {
-            reject(new Error("GM stream transport is unavailable in this browser."));
-            return;
-          }
+            if (!(response.response instanceof ReadableStream)) {
+              reject(new Error("GM stream transport is unavailable in this browser."));
+              return;
+            }
 
-          try {
-            const blob = await parseTranslationStream(
-              response.response,
-              options.onEvent,
-              options.signal
-            );
-            resolve(blob);
-          } catch (error) {
-            reject(error);
-          }
-        },
-        onload: () => {
-          if (!streamStarted) {
-            reject(new Error("GM stream transport ended before the stream started."));
-          }
-        },
-        onerror: () => reject(new Error("GM transport failed to reach the translation server.")),
-        ontimeout: () => reject(new Error("GM transport timed out."))
-      });
+            try {
+              const blob = await parseTranslationStream(
+                response.response,
+                options.onEvent,
+                options.signal
+              );
+              resolve(blob);
+            } catch (error) {
+              reject(error);
+            }
+          },
+          onload: () => {
+            if (!streamStarted) {
+              reject(new Error("GM stream transport ended before the stream started."));
+            }
+          },
+          onerror: () => reject(new Error("GM transport failed to reach the translation server.")),
+          ontimeout: () => reject(new Error("GM transport timed out."))
+        });
 
-      options.signal?.addEventListener("abort", () => request.abort(), { once: true });
+        options.signal?.addEventListener("abort", () => request.abort(), { once: true });
+      })().catch(reject);
     });
   }
 
@@ -359,38 +426,46 @@ export class TransportClient {
     });
 
     return new Promise<Blob>((resolve, reject) => {
-      const request = this.gmRequest({
-        method: "POST",
-        url: joinServerUrl(options.settings.serverBaseUrl, "/translate/with-form/image"),
-        headers: buildHeaders(options.settings),
-        data: createTranslationFormData(options.imageBlob, options.fileName, options.settings),
-        responseType: "blob",
-        fetch: true,
-        onload: (response) => {
-          if (response.status >= 400) {
-            reject(
-              new HttpStatusError(response.status, response.responseText || `HTTP ${response.status}`)
-            );
-            return;
-          }
+      void (async () => {
+        const multipartPayload = await createGMTranslationPayload(
+          options.imageBlob,
+          options.fileName,
+          options.settings
+        );
 
-          if (response.response instanceof Blob) {
-            resolve(response.response);
-            return;
-          }
+        const request = this.gmRequest({
+          method: "POST",
+          url: joinServerUrl(options.settings.serverBaseUrl, "/translate/with-form/image"),
+          headers: multipartPayload.headers,
+          data: multipartPayload.data,
+          responseType: "blob",
+          fetch: true,
+          onload: (response) => {
+            if (response.status >= 400) {
+              reject(
+                new HttpStatusError(response.status, response.responseText || `HTTP ${response.status}`)
+              );
+              return;
+            }
 
-          if (response.response instanceof ArrayBuffer) {
-            resolve(new Blob([response.response], { type: "image/png" }));
-            return;
-          }
+            if (response.response instanceof Blob) {
+              resolve(response.response);
+              return;
+            }
 
-          reject(new Error("GM blob transport did not return an image response."));
-        },
-        onerror: () => reject(new Error("GM blob transport failed to reach the translation server.")),
-        ontimeout: () => reject(new Error("GM blob transport timed out."))
-      });
+            if (response.response instanceof ArrayBuffer) {
+              resolve(new Blob([response.response], { type: "image/png" }));
+              return;
+            }
 
-      options.signal?.addEventListener("abort", () => request.abort(), { once: true });
+            reject(new Error("GM blob transport did not return an image response."));
+          },
+          onerror: () => reject(new Error("GM blob transport failed to reach the translation server.")),
+          ontimeout: () => reject(new Error("GM blob transport timed out."))
+        });
+
+        options.signal?.addEventListener("abort", () => request.abort(), { once: true });
+      })().catch(reject);
     });
   }
 }
