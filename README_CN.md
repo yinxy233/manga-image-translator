@@ -158,6 +158,8 @@
 官方演示站 (由 zyddnys 维护)： <https://touhou.ai/imgtrans/>\
 浏览器脚本 (由 QiroNT 维护): <https://greasyfork.org/scripts/437569>
 
+- 本仓库内置远程油猴脚本工程： [userscript/README.md](userscript/README.md)
+
 - 注意：如果在线版无法访问，可能是因为 Google GCP 正在重启服务器，请稍等片刻，等待服务重启。
 - 在线版使用的是目前 main 分支的最新版本。
 
@@ -330,6 +332,12 @@ $ python main.py --use-gpu
 
 [FastAPI-html](https://cfbed.1314883.xyz/file/1741386061808_FastAPI%20-%20Swagger%20UI.html)  
 
+新增公共接口与远程接入说明：
+
+- `GET /health` 会返回 `status`、`version` 和 `queue_size`
+- 可通过 `--api-key` 或 `MT_PUBLIC_API_KEY` 为公开翻译接口开启鉴权
+- 配套油猴脚本的构建、安装与远程部署说明见 [userscript/README.md](userscript/README.md)
+
 ### config-help 模式
 ```bash
 python -m manga_translator config-help
@@ -435,6 +443,7 @@ shared              以 API 模式运行
 --host HOST         API 服务的主机（默认：127.0.0.1）
 --port PORT         API 服务的端口（默认：5003）
 --nonce NONCE       用于保护内部 API 服务器通信的 Nonce
+--api-key API_KEY   用于保护公开翻译接口的可选 API Key
 --report REPORT     向服务器报告以注册实例（默认：None）
 --models-ttl MODELS_TTL  模型在内存中的 TTL（秒）（0 表示永远）
 ```
@@ -446,6 +455,7 @@ shared              以 API 模式运行
 --port PORT           端口号（默认：8000）
 --start-instance      是否应自动启动翻译器实例
 --nonce NONCE         用于保护内部 Web 服务器通信的 Nonce
+--api-key API_KEY     用于保护公开翻译接口的可选 API Key
 --models-ttl MODELS_TTL  模型在内存中的 TTL（秒）（0 表示永远）
 ```
 
