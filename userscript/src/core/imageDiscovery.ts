@@ -150,6 +150,7 @@ export class ImageDiscovery {
 
   private observeImage(image: HTMLImageElement): void {
     if (this.observedImages.has(image)) {
+      this.intersectionObserver.unobserve(image);
       this.intersectionObserver.observe(image);
       return;
     }

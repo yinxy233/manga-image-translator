@@ -195,6 +195,7 @@ export class TranslatorController {
     this.enabled = !this.enabled;
     if (this.enabled) {
       this.queue.resume();
+      this.discovery.reset();
       this.discovery.rescan();
       this.overlay.toast("已启动本页自动翻译。", "neutral");
     } else {

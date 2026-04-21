@@ -162,6 +162,11 @@ const STYLE_TEXT = `
     color: #b91c1c;
   }
 
+  .mit-btn[data-utility="true"] {
+    min-width: 40px;
+    padding: 8px 10px;
+  }
+
   .mit-btn:not([data-tone]),
   .mit-settings-actions .mit-btn {
     border-color: #2563eb;
@@ -171,8 +176,8 @@ const STYLE_TEXT = `
 
   .mit-dock {
     position: fixed;
-    right: 20px;
-    bottom: 20px;
+    right: max(12px, env(safe-area-inset-right));
+    bottom: max(12px, env(safe-area-inset-bottom));
     width: 328px;
     pointer-events: auto;
     padding: 16px;
@@ -181,6 +186,13 @@ const STYLE_TEXT = `
     color: #111827;
     box-shadow: 0 14px 36px rgba(0, 0, 0, 0.16);
     border: 1px solid #e5e7eb;
+    transition: opacity 160ms ease, transform 160ms ease;
+  }
+
+  .mit-dock[data-collapsed="true"] {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+    pointer-events: none;
   }
 
   .mit-title {
@@ -194,6 +206,12 @@ const STYLE_TEXT = `
     margin: 0;
     font-size: 16px;
     font-weight: 800;
+  }
+
+  .mit-title-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
   .mit-subtitle {
@@ -255,6 +273,31 @@ const STYLE_TEXT = `
     background: #fef2f2;
     color: #b91c1c;
     border-color: #fecaca;
+  }
+
+  .mit-launcher {
+    position: fixed;
+    right: max(12px, env(safe-area-inset-right));
+    bottom: max(12px, env(safe-area-inset-bottom));
+    min-width: 112px;
+    min-height: 46px;
+    padding: 0 14px;
+    border: 1px solid rgba(37, 99, 235, 0.28);
+    border-radius: 999px;
+    background: rgba(17, 24, 39, 0.94);
+    color: #ffffff;
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.2);
+    font-size: 13px;
+    font-weight: 800;
+    cursor: pointer;
+    pointer-events: auto;
+    transition: opacity 160ms ease, transform 160ms ease;
+  }
+
+  .mit-launcher[data-open="true"] {
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+    pointer-events: none;
   }
 
   .mit-settings {
@@ -360,16 +403,39 @@ const STYLE_TEXT = `
     color: #991b1b;
   }
 
-  @media (max-width: 720px) {
+  @media (pointer: coarse), (max-width: 720px) {
+    .mit-btn {
+      min-height: 42px;
+      font-size: 13px;
+    }
+
+    .mit-launcher {
+      min-height: 50px;
+      min-width: 120px;
+      font-size: 14px;
+    }
+
     .mit-dock {
       left: 12px;
       right: 12px;
-      bottom: 12px;
+      bottom: max(12px, env(safe-area-inset-bottom));
       width: auto;
+    }
+
+    .mit-controls {
+      grid-template-columns: 1fr;
     }
 
     .mit-settings-grid {
       grid-template-columns: 1fr;
+    }
+
+    .mit-status-card {
+      left: 8px;
+      right: 8px;
+      top: auto;
+      bottom: 8px;
+      max-width: none;
     }
   }
 `;
@@ -389,6 +455,8 @@ export class OverlayManager {
 
   private readonly settingsPanel: HTMLDivElement;
 
+  private readonly launcher: HTMLButtonElement;
+
   private readonly startPauseButton: HTMLButtonElement;
 
   private readonly globalToggleButton: HTMLButtonElement;
@@ -396,6 +464,8 @@ export class OverlayManager {
   private readonly testButton: HTMLButtonElement;
 
   private readonly settingsButton: HTMLButtonElement;
+
+  private readonly collapseButton: HTMLButtonElement;
 
   private readonly queueValue: HTMLSpanElement;
 
@@ -425,6 +495,8 @@ export class OverlayManager {
 
   private settingsOpen = false;
 
+  private collapsed = shouldStartCollapsed();
+
   constructor(settings: UserscriptSettings, callbacks: OverlayManagerCallbacks) {
     this.callbacks = callbacks;
 
@@ -448,10 +520,20 @@ export class OverlayManager {
     this.dock = document.createElement("div");
     this.dock.className = "mit-dock";
 
+    this.launcher = document.createElement("button");
+    this.launcher.type = "button";
+    this.launcher.className = "mit-launcher";
+    this.launcher.textContent = "打开面板";
+
     this.startPauseButton = this.createButton("启动本页", "primary");
     this.globalToggleButton = this.createButton("显示原图", "ghost");
     this.testButton = this.createButton("连接测试", "ghost");
     this.settingsButton = this.createButton("设置", "ghost");
+    this.settingsButton.dataset.utility = "true";
+    this.settingsButton.classList.add("mit-settings-btn");
+    this.collapseButton = this.createButton("收起", "ghost");
+    this.collapseButton.dataset.utility = "true";
+    this.collapseButton.classList.add("mit-collapse-btn");
     this.queueValue = document.createElement("span");
     this.runningValue = document.createElement("span");
     this.doneValue = document.createElement("span");
@@ -469,13 +551,14 @@ export class OverlayManager {
     this.settingsPanel = this.buildSettingsPanel(settings);
     this.dock.append(...this.buildDockContent());
 
-    root.append(this.overlayLayer, this.dock, this.toastLayer);
+    root.append(this.overlayLayer, this.dock, this.launcher, this.toastLayer);
     this.shadowRoot.append(style, root);
 
     window.addEventListener("scroll", () => this.syncPositions(), { passive: true });
     window.addEventListener("resize", () => this.syncPositions(), { passive: true });
 
     this.bindControls();
+    this.syncDockVisibility();
     this.updateSettings(settings);
   }
 
@@ -574,7 +657,11 @@ export class OverlayManager {
     subtitle.textContent = "点击开始后，当前页和后续图片会自动加入翻译队列。";
     titleBlock.append(heading, subtitle);
 
-    title.append(titleBlock, this.settingsButton);
+    const titleActions = document.createElement("div");
+    titleActions.className = "mit-title-actions";
+    titleActions.append(this.settingsButton, this.collapseButton);
+
+    title.append(titleBlock, titleActions);
 
     const controls = document.createElement("div");
     controls.className = "mit-controls";
@@ -600,6 +687,16 @@ export class OverlayManager {
       this.settingsOpen = !this.settingsOpen;
       this.settingsPanel.dataset.open = String(this.settingsOpen);
     });
+    this.collapseButton.addEventListener("click", () => {
+      this.settingsOpen = false;
+      this.settingsPanel.dataset.open = "false";
+      this.collapsed = true;
+      this.syncDockVisibility();
+    });
+    this.launcher.addEventListener("click", () => {
+      this.collapsed = false;
+      this.syncDockVisibility();
+    });
   }
 
   private createButton(text: string, tone: "primary" | "ghost" | "danger"): HTMLButtonElement {
@@ -611,6 +708,12 @@ export class OverlayManager {
     }
     button.textContent = text;
     return button;
+  }
+
+  private syncDockVisibility(): void {
+    this.dock.dataset.collapsed = String(this.collapsed);
+    this.launcher.dataset.open = String(!this.collapsed);
+    this.launcher.textContent = this.collapsed ? "打开面板" : "面板已打开";
   }
 
   private createStatCard(label: string, valueNode: HTMLSpanElement): HTMLDivElement {
@@ -786,4 +889,11 @@ export class OverlayManager {
     this.itemRefs.set(id, refs);
     return refs;
   }
+}
+
+function shouldStartCollapsed(): boolean {
+  if (typeof window.matchMedia !== "function") {
+    return false;
+  }
+  return window.matchMedia("(pointer: coarse), (max-width: 720px)").matches;
 }

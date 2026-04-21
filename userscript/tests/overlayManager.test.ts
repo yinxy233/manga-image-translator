@@ -49,4 +49,40 @@ describe("OverlayManager", () => {
 
     overlay.destroy();
   });
+
+  it("starts collapsed on touch layouts and can reopen from launcher", () => {
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: vi.fn().mockReturnValue({
+        matches: true,
+        media: "(pointer: coarse), (max-width: 720px)",
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn()
+      })
+    });
+
+    const overlay = new OverlayManager(DEFAULT_SETTINGS, {
+      onToggleSession: vi.fn(),
+      onToggleGlobalOriginal: vi.fn(),
+      onTestConnection: vi.fn(),
+      onSaveSettings: vi.fn(),
+      onToggleImageOriginal: vi.fn(),
+      onRetryImage: vi.fn(),
+      onCancelImage: vi.fn(),
+      onIgnoreImage: vi.fn()
+    });
+
+    const dock = overlay.shadowRoot.querySelector(".mit-dock") as HTMLDivElement;
+    const launcher = overlay.shadowRoot.querySelector(".mit-launcher") as HTMLButtonElement;
+
+    expect(dock.dataset.collapsed).toBe("true");
+    launcher.click();
+    expect(dock.dataset.collapsed).toBe("false");
+
+    overlay.destroy();
+  });
 });

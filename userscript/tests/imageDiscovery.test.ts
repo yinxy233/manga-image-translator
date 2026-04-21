@@ -7,12 +7,14 @@ class FakeIntersectionObserver {
 
   private readonly callback: IntersectionObserverCallback;
 
+  observe = vi.fn((_target: Element) => undefined);
+
+  unobserve = vi.fn((_target: Element) => undefined);
+
   constructor(callback: IntersectionObserverCallback) {
     this.callback = callback;
     FakeIntersectionObserver.instance = this;
   }
-
-  observe(_target: Element): void {}
 
   disconnect(): void {}
 
@@ -66,5 +68,37 @@ describe("ImageDiscovery", () => {
 
     expect(eligible).toHaveBeenCalledTimes(1);
     expect(eligible).toHaveBeenCalledWith(largeImage);
+  });
+
+  it("re-observes known images after reset and rescan", () => {
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+    const eligible = vi.fn();
+
+    const image = document.createElement("img");
+    Object.defineProperty(image, "complete", { value: true });
+    Object.defineProperty(image, "naturalWidth", { value: 1200 });
+    Object.defineProperty(image, "naturalHeight", { value: 1800 });
+    Object.defineProperty(image, "currentSrc", { value: "https://example.com/page-2.jpg" });
+    image.getBoundingClientRect = () =>
+      ({
+        width: 480,
+        height: 720
+      }) as DOMRect;
+
+    document.body.append(image);
+
+    const discovery = new ImageDiscovery({ onImageEligible: eligible });
+    discovery.start();
+    FakeIntersectionObserver.instance?.trigger(image);
+
+    eligible.mockClear();
+    FakeIntersectionObserver.instance?.observe.mockClear();
+    FakeIntersectionObserver.instance?.unobserve.mockClear();
+
+    discovery.reset();
+    discovery.rescan();
+
+    expect(FakeIntersectionObserver.instance?.unobserve).toHaveBeenCalledWith(image);
+    expect(FakeIntersectionObserver.instance?.observe).toHaveBeenCalledWith(image);
   });
 });
