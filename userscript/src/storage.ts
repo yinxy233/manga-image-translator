@@ -22,12 +22,17 @@ export function sanitizeSettings(settings: Partial<UserscriptSettings>): Userscr
   const maxConcurrency = Number.isFinite(settings.maxConcurrency)
     ? Math.min(6, Math.max(1, Number(settings.maxConcurrency)))
     : DEFAULT_SETTINGS.maxConcurrency;
+  const uploadTransport =
+    settings.uploadTransport === "base64-json" || settings.uploadTransport === "multipart"
+      ? settings.uploadTransport
+      : DEFAULT_SETTINGS.uploadTransport;
 
   return {
     serverBaseUrl: String(settings.serverBaseUrl ?? DEFAULT_SETTINGS.serverBaseUrl).trim() || DEFAULT_SETTINGS.serverBaseUrl,
     apiKey: String(settings.apiKey ?? DEFAULT_SETTINGS.apiKey),
     targetLanguage: String(settings.targetLanguage ?? DEFAULT_SETTINGS.targetLanguage).trim() || DEFAULT_SETTINGS.targetLanguage,
     translator: (settings.translator ?? DEFAULT_SETTINGS.translator) as UserscriptSettings["translator"],
+    uploadTransport,
     autoTranslateEnabled: Boolean(settings.autoTranslateEnabled ?? DEFAULT_SETTINGS.autoTranslateEnabled),
     maxConcurrency
   };

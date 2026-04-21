@@ -102,6 +102,47 @@ describe("TransportClient", () => {
     expect(gmRequest.mock.calls[1]?.[0]?.responseType).toBe("blob");
   });
 
+  it("uses base64 JSON transport when configured", async () => {
+    const fetchImpl = vi.fn(async () => new Response(createStreamResponse(), { status: 200 }));
+    const gmRequest = vi.fn();
+
+    const transport = new TransportClient({
+      fetchImpl,
+      gmRequest: gmRequest as unknown as (details: GMRequestDetails<unknown>) => GMRequestHandle
+    });
+
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      uploadTransport: "base64-json" as const
+    };
+
+    const result = await transport.translateImage({
+      imageBlob: new Blob(["test-image"], { type: "image/png" }),
+      fileName: "page.png",
+      settings,
+      onEvent: vi.fn()
+    });
+
+    const firstCall = fetchImpl.mock.calls[0] as unknown[] | undefined;
+    const requestUrl = String(firstCall?.[0] ?? "");
+    const requestInit = (firstCall?.[1] ?? {}) as RequestInit;
+    const body = JSON.parse(String(requestInit.body)) as {
+      image: string;
+      config: {
+        translator: {
+          target_lang: string;
+        };
+      };
+    };
+
+    expect(result).toBeInstanceOf(Blob);
+    expect(requestUrl).toContain("/translate/image/stream");
+    expect(requestInit.headers).toMatchObject({ "Content-Type": "application/json" });
+    expect(body.image.startsWith("data:image/png;base64,")).toBe(true);
+    expect(body.config.translator.target_lang).toBe("CHS");
+    expect(gmRequest).not.toHaveBeenCalled();
+  });
+
   it("serializes GM uploads as explicit multipart payloads", async () => {
     const fetchImpl = vi.fn(async () => {
       throw new TypeError("Failed to fetch");

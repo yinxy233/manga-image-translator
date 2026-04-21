@@ -5,6 +5,7 @@ export const DEFAULT_SETTINGS: UserscriptSettings = {
   apiKey: "",
   targetLanguage: "CHS",
   translator: "youdao",
+  uploadTransport: "multipart",
   autoTranslateEnabled: false,
   maxConcurrency: 2
 };
@@ -46,6 +47,14 @@ export const LANGUAGE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "DEU", label: "Deutsch" },
   { value: "PTB", label: "português" },
   { value: "VIN", label: "Tiếng Việt" }
+];
+
+export const TRANSPORT_OPTIONS: Array<{
+  value: UserscriptSettings["uploadTransport"];
+  label: string;
+}> = [
+  { value: "multipart", label: "Multipart FormData" },
+  { value: "base64-json", label: "Base64 JSON" }
 ];
 
 export const MIN_RENDER_WIDTH = 220;

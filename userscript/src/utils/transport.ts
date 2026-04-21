@@ -17,6 +17,27 @@ interface TranslateImageOptions {
   signal?: AbortSignal;
 }
 
+interface TranslationConfigPayload {
+  detector: {
+    detector: string;
+    detection_size: number;
+    box_threshold: number;
+    unclip_ratio: number;
+  };
+  render: {
+    direction: string;
+  };
+  translator: {
+    translator: UserscriptSettings["translator"];
+    target_lang: string;
+  };
+  inpainter: {
+    inpainter: string;
+    inpainting_size: number;
+  };
+  mask_dilation_offset: number;
+}
+
 export class HttpStatusError extends Error {
   readonly status: number;
 
@@ -53,8 +74,15 @@ function buildHeaders(settings: UserscriptSettings): Record<string, string> {
   };
 }
 
-function buildTranslationConfig(settings: UserscriptSettings): string {
-  return JSON.stringify({
+function buildJsonHeaders(settings: UserscriptSettings): Record<string, string> {
+  return {
+    ...buildHeaders(settings),
+    "Content-Type": "application/json"
+  };
+}
+
+function buildTranslationConfigPayload(settings: UserscriptSettings): TranslationConfigPayload {
+  return {
     detector: {
       detector: "default",
       detection_size: 1536,
@@ -73,7 +101,11 @@ function buildTranslationConfig(settings: UserscriptSettings): string {
       inpainting_size: 2048
     },
     mask_dilation_offset: 30
-  });
+  };
+}
+
+function buildTranslationConfig(settings: UserscriptSettings): string {
+  return JSON.stringify(buildTranslationConfigPayload(settings));
 }
 
 function createTranslationFormData(blob: Blob, fileName: string, settings: UserscriptSettings): FormData {
@@ -101,6 +133,41 @@ async function blobToArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
   }
 
   return new Response(blob).arrayBuffer();
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  if (typeof btoa === "function") {
+    let binary = "";
+    const chunkSize = 0x8000;
+
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      const chunk = bytes.subarray(offset, offset + chunkSize);
+      for (const byte of chunk) {
+        binary += String.fromCharCode(byte);
+      }
+    }
+
+    return btoa(binary);
+  }
+
+  return Buffer.from(bytes).toString("base64");
+}
+
+async function blobToDataUrl(blob: Blob): Promise<string> {
+  const mimeType = blob.type || "application/octet-stream";
+  const base64 = arrayBufferToBase64(await blobToArrayBuffer(blob));
+  return `data:${mimeType};base64,${base64}`;
+}
+
+async function createJsonTranslationPayload(
+  blob: Blob,
+  settings: UserscriptSettings
+): Promise<string> {
+  return JSON.stringify({
+    image: await blobToDataUrl(blob),
+    config: buildTranslationConfigPayload(settings)
+  });
 }
 
 async function createGMTranslationPayload(
@@ -253,6 +320,14 @@ export class TransportClient {
   }
 
   async translateImage(options: TranslateImageOptions): Promise<Blob> {
+    if (options.settings.uploadTransport === "base64-json") {
+      return this.translateImageWithJsonTransport(options);
+    }
+
+    return this.translateImageWithMultipartTransport(options);
+  }
+
+  private async translateImageWithMultipartTransport(options: TranslateImageOptions): Promise<Blob> {
     try {
       return await this.translateImageWithFetch(options);
     } catch (fetchError) {
@@ -268,6 +343,28 @@ export class TransportClient {
         }
 
         return this.translateImageWithGMBlob(options);
+      }
+    }
+  }
+
+  private async translateImageWithJsonTransport(options: TranslateImageOptions): Promise<Blob> {
+    const jsonPayload = await createJsonTranslationPayload(options.imageBlob, options.settings);
+
+    try {
+      return await this.translateImageWithJsonFetch(options, jsonPayload);
+    } catch (fetchError) {
+      if (!shouldFallback(fetchError)) {
+        throw fetchError;
+      }
+
+      try {
+        return await this.translateImageWithJsonGMStream(options, jsonPayload);
+      } catch (gmStreamError) {
+        if (!shouldFallback(gmStreamError)) {
+          throw gmStreamError;
+        }
+
+        return this.translateImageWithJsonGMBlob(options, jsonPayload);
       }
     }
   }
@@ -336,6 +433,130 @@ export class TransportClient {
       });
 
       signal?.addEventListener("abort", () => request.abort(), { once: true });
+    });
+  }
+
+  private async translateImageWithJsonFetch(
+    options: TranslateImageOptions,
+    jsonPayload: string
+  ): Promise<Blob> {
+    const response = await this.fetchImpl(
+      joinServerUrl(options.settings.serverBaseUrl, "/translate/image/stream"),
+      {
+        method: "POST",
+        headers: buildJsonHeaders(options.settings),
+        body: jsonPayload,
+        signal: options.signal
+      }
+    );
+
+    if (!response.ok) {
+      throw await toHttpStatusError(response);
+    }
+
+    if (!response.body) {
+      throw new Error("Translation response does not expose a readable stream.");
+    }
+
+    return parseTranslationStream(response.body, options.onEvent, options.signal);
+  }
+
+  private async translateImageWithJsonGMStream(
+    options: TranslateImageOptions,
+    jsonPayload: string
+  ): Promise<Blob> {
+    return new Promise<Blob>((resolve, reject) => {
+      let streamStarted = false;
+
+      const request = this.gmRequest({
+        method: "POST",
+        url: joinServerUrl(options.settings.serverBaseUrl, "/translate/image/stream"),
+        headers: buildJsonHeaders(options.settings),
+        data: jsonPayload,
+        responseType: "stream",
+        fetch: true,
+        onloadstart: async (response) => {
+          streamStarted = true;
+
+          if (response.status >= 400) {
+            reject(
+              new HttpStatusError(response.status, response.responseText || `HTTP ${response.status}`)
+            );
+            return;
+          }
+
+          if (!(response.response instanceof ReadableStream)) {
+            reject(new Error("GM stream transport is unavailable in this browser."));
+            return;
+          }
+
+          try {
+            const blob = await parseTranslationStream(
+              response.response,
+              options.onEvent,
+              options.signal
+            );
+            resolve(blob);
+          } catch (error) {
+            reject(error);
+          }
+        },
+        onload: () => {
+          if (!streamStarted) {
+            reject(new Error("GM stream transport ended before the stream started."));
+          }
+        },
+        onerror: () => reject(new Error("GM transport failed to reach the translation server.")),
+        ontimeout: () => reject(new Error("GM transport timed out."))
+      });
+
+      options.signal?.addEventListener("abort", () => request.abort(), { once: true });
+    });
+  }
+
+  private async translateImageWithJsonGMBlob(
+    options: TranslateImageOptions,
+    jsonPayload: string
+  ): Promise<Blob> {
+    options.onEvent({
+      code: 1,
+      payload: new Uint8Array(),
+      text: "兼容模式：等待完整结果"
+    });
+
+    return new Promise<Blob>((resolve, reject) => {
+      const request = this.gmRequest({
+        method: "POST",
+        url: joinServerUrl(options.settings.serverBaseUrl, "/translate/image"),
+        headers: buildJsonHeaders(options.settings),
+        data: jsonPayload,
+        responseType: "blob",
+        fetch: true,
+        onload: (response) => {
+          if (response.status >= 400) {
+            reject(
+              new HttpStatusError(response.status, response.responseText || `HTTP ${response.status}`)
+            );
+            return;
+          }
+
+          if (response.response instanceof Blob) {
+            resolve(response.response);
+            return;
+          }
+
+          if (response.response instanceof ArrayBuffer) {
+            resolve(new Blob([response.response], { type: "image/png" }));
+            return;
+          }
+
+          reject(new Error("GM blob transport did not return an image response."));
+        },
+        onerror: () => reject(new Error("GM blob transport failed to reach the translation server.")),
+        ontimeout: () => reject(new Error("GM blob transport timed out."))
+      });
+
+      options.signal?.addEventListener("abort", () => request.abort(), { once: true });
     });
   }
 

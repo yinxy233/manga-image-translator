@@ -1,4 +1,4 @@
-import { LANGUAGE_OPTIONS, TRANSLATOR_OPTIONS } from "../config";
+import { LANGUAGE_OPTIONS, TRANSLATOR_OPTIONS, TRANSPORT_OPTIONS } from "../config";
 import type {
   ConnectionState,
   OverlayViewModel,
@@ -639,6 +639,8 @@ export class OverlayManager {
 
   private readonly languageSelect: HTMLSelectElement;
 
+  private readonly transportSelect: HTMLSelectElement;
+
   private readonly autoCheckbox: HTMLInputElement;
 
   private readonly concurrencyInput: HTMLInputElement;
@@ -701,6 +703,7 @@ export class OverlayManager {
     this.apiKeyInput = document.createElement("input");
     this.translatorSelect = document.createElement("select");
     this.languageSelect = document.createElement("select");
+    this.transportSelect = document.createElement("select");
     this.autoCheckbox = document.createElement("input");
     this.concurrencyInput = document.createElement("input");
 
@@ -734,6 +737,7 @@ export class OverlayManager {
     this.apiKeyInput.value = settings.apiKey;
     this.translatorSelect.value = settings.translator;
     this.languageSelect.value = settings.targetLanguage;
+    this.transportSelect.value = settings.uploadTransport;
     this.autoCheckbox.checked = settings.autoTranslateEnabled;
     this.concurrencyInput.value = String(settings.maxConcurrency);
   }
@@ -924,6 +928,14 @@ export class OverlayManager {
       this.languageSelect.appendChild(element);
     }
 
+    this.transportSelect.className = "mit-select";
+    for (const option of TRANSPORT_OPTIONS) {
+      const element = document.createElement("option");
+      element.value = option.value;
+      element.textContent = option.label;
+      this.transportSelect.appendChild(element);
+    }
+
     this.autoCheckbox.type = "checkbox";
     this.concurrencyInput.type = "number";
     this.concurrencyInput.min = "1";
@@ -935,6 +947,7 @@ export class OverlayManager {
       this.createField("API Key", this.apiKeyInput, true),
       this.createField("Translator", this.translatorSelect),
       this.createField("Target", this.languageSelect),
+      this.createField("Upload", this.transportSelect),
       this.createSwitchField("Auto Start", this.autoCheckbox),
       this.createField("Concurrency", this.concurrencyInput)
     );
@@ -949,6 +962,7 @@ export class OverlayManager {
         apiKey: this.apiKeyInput.value,
         translator: this.translatorSelect.value as UserscriptSettings["translator"],
         targetLanguage: this.languageSelect.value,
+        uploadTransport: this.transportSelect.value as UserscriptSettings["uploadTransport"],
         autoTranslateEnabled: this.autoCheckbox.checked,
         maxConcurrency: Number(this.concurrencyInput.value)
       });

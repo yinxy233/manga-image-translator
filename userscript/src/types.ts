@@ -23,11 +23,14 @@ export type TranslatorKey =
   | "qwen2_big"
   | "none";
 
+export type UploadTransport = "multipart" | "base64-json";
+
 export interface UserscriptSettings {
   serverBaseUrl: string;
   apiKey: string;
   targetLanguage: string;
   translator: TranslatorKey;
+  uploadTransport: UploadTransport;
   autoTranslateEnabled: boolean;
   maxConcurrency: number;
 }
