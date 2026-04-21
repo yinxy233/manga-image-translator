@@ -444,6 +444,7 @@ shared              以 API 模式运行
 --port PORT         API 服务的端口（默认：5003）
 --nonce NONCE       用于保护内部 API 服务器通信的 Nonce
 --api-key API_KEY   用于保护公开翻译接口的可选 API Key
+--instances INSTANCES 要启动的内部翻译 worker 实例数量（默认：1）
 --report REPORT     向服务器报告以注册实例（默认：None）
 --models-ttl MODELS_TTL  模型在内存中的 TTL（秒）（0 表示永远）
 ```
@@ -454,6 +455,7 @@ shared              以 API 模式运行
 --host HOST           主机地址（默认：127.0.0.1）
 --port PORT           端口号（默认：8000）
 --start-instance      是否应自动启动翻译器实例
+--instances INSTANCES 要启动的内部翻译 worker 实例数量（默认：1）
 --nonce NONCE         用于保护内部 Web 服务器通信的 Nonce
 --api-key API_KEY     用于保护公开翻译接口的可选 API Key
 --models-ttl MODELS_TTL  模型在内存中的 TTL（秒）（0 表示永远）

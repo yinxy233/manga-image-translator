@@ -30,7 +30,7 @@ pnpm build
 
 ```bash
 cd server
-python main.py --host 0.0.0.0 --port 8000 --use-gpu --api-key "replace-with-a-strong-secret"
+python main.py --host 0.0.0.0 --port 8000 --use-gpu --api-key "replace-with-a-strong-secret" --instances 2
 ```
 
 ### Option 2: Environment Variable
@@ -38,7 +38,7 @@ python main.py --host 0.0.0.0 --port 8000 --use-gpu --api-key "replace-with-a-st
 ```bash
 export MT_PUBLIC_API_KEY="replace-with-a-strong-secret"
 cd server
-python main.py --host 0.0.0.0 --port 8000 --use-gpu
+python main.py --host 0.0.0.0 --port 8000 --use-gpu --instances 2
 ```
 
 ### Docker Example
@@ -91,6 +91,11 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - `targetLanguage`: `CHS`
 - `translator`: `youdao`
 - `maxConcurrency`: `2`
+
+如果你希望多张图片同时翻译，需要同时满足两点：
+
+- userscript 的 `maxConcurrency` 大于 `1`
+- 服务端通过 `--instances N` 启动了至少 `N` 个内部翻译 worker
 
 ## Usage
 

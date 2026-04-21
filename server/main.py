@@ -3,7 +3,6 @@ import logging
 import os
 import secrets
 import shutil
-import signal
 import subprocess
 import sys
 from argparse import Namespace
@@ -294,6 +293,19 @@ def get_internal_instance_host(host: str) -> str:
     return host
 
 
+def build_internal_instance_ports(web_port: int, instances: int) -> list[int]:
+    """Build the port list for internal translator workers.
+
+    Args:
+        web_port: Public web server port.
+        instances: Number of worker instances to launch.
+
+    Returns:
+        Sequential internal ports starting from ``web_port + 1``.
+    """
+    return [web_port + 1 + offset for offset in range(instances)]
+
+
 def start_translator_client_proc(
     host: str,
     port: int,
@@ -339,14 +351,43 @@ def start_translator_client_proc(
     proc = subprocess.Popen(cmds, cwd=parent)
     executor_instances.register(ExecutorInstance(ip=internal_host, port=port))
 
-    def handle_exit_signals(signal, frame):
-        proc.terminate()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, handle_exit_signals)
-    signal.signal(signal.SIGTERM, handle_exit_signals)
-
     return proc
+
+
+def start_translator_client_procs(
+    host: str,
+    web_port: int,
+    nonce: str | None,
+    params: Namespace,
+) -> list[subprocess.Popen[bytes]]:
+    """Start one or more internal translator workers.
+
+    Args:
+        host: Public bind host configured for the web server.
+        web_port: Public web server port.
+        nonce: Nonce used for internal service authentication.
+        params: Parsed CLI arguments.
+
+    Returns:
+        The list of spawned translator processes.
+    """
+    processes: list[subprocess.Popen[bytes]] = []
+    for port in build_internal_instance_ports(web_port, params.instances):
+        processes.append(start_translator_client_proc(host, port, nonce, params))
+    return processes
+
+
+def terminate_processes(processes: list[subprocess.Popen[bytes]] | None) -> None:
+    """Terminate spawned translator worker processes.
+
+    Args:
+        processes: Process handles returned by ``start_translator_client_procs``.
+    """
+    if not processes:
+        return
+    for proc in processes:
+        if proc.poll() is None:
+            proc.terminate()
 
 def prepare(args):
     global nonce
@@ -355,7 +396,7 @@ def prepare(args):
     else:
         nonce = args.nonce
     if args.start_instance:
-        return start_translator_client_proc(args.host, args.port + 1, nonce, args)
+        return start_translator_client_procs(args.host, args.port, nonce, args)
     folder_name= "upload-cache"
     if os.path.exists(folder_name):
         shutil.rmtree(folder_name)
@@ -464,10 +505,12 @@ if __name__ == '__main__':
     server_settings = load_server_settings(args.api_key)
     app.version = server_settings.version
     args.start_instance = True
-    proc = prepare(args)
+    procs = prepare(args)
     print("Nonce: "+nonce)
     try:
         uvicorn.run(app, host=args.host, port=args.port)
     except Exception:
-        if proc:
-            proc.terminate()
+        terminate_processes(procs)
+        raise
+    finally:
+        terminate_processes(procs)

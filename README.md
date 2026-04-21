@@ -451,6 +451,7 @@ shared              run in API mode
 --port PORT         Port of the API service (default: 5003)
 --nonce NONCE       Nonce used to secure internal API server communication, set to "None" to disable
 --api-key API_KEY   Optional API key for protecting public translation endpoints
+--instances INSTANCES Number of internal translator worker instances to launch (default: 1)
 --report REPORT     Report to server to register instance (default: None)
 --models-ttl MODELS_TTL  TTL of models in memory in seconds (0 means forever)
 ```
@@ -462,6 +463,7 @@ shared              run in API mode
 --port PORT           Port number (default: 8000)
 --start-instance      Whether an instance of the translator should be started automatically
 --nonce NONCE         Nonce used to secure internal Web Server communication, set to "None" to disable
+--instances INSTANCES Number of internal translator worker instances to launch (default: 1)
 --api-key API_KEY     Optional API key for protecting public translation endpoints
 --models-ttl MODELS_TTL  Time in seconds to keep models in memory after last use (0 means forever)
 ```

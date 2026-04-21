@@ -186,3 +186,36 @@ def test_internal_nonce_route_is_not_blocked_by_public_api_key(monkeypatch) -> N
         )
 
     assert response.status_code == 200
+
+
+def test_build_internal_instance_ports_returns_incremental_ports() -> None:
+    """Internal translator worker ports should increment from the web port."""
+    assert server_main.build_internal_instance_ports(8000, 3) == [8001, 8002, 8003]
+
+
+def test_prepare_starts_multiple_instances(monkeypatch) -> None:
+    """Prepare should launch the configured number of internal translator workers."""
+    started_ports: list[int] = []
+
+    def fake_start_proc(host: str, port: int, nonce: str | None, _params: object) -> str:
+        started_ports.append(port)
+        return f"{host}:{port}:{nonce}"
+
+    monkeypatch.setattr(server_main, "start_translator_client_proc", fake_start_proc)
+
+    args = SimpleNamespace(
+        nonce="nonce-value",
+        start_instance=True,
+        host="0.0.0.0",
+        port=8000,
+        instances=3,
+    )
+
+    processes = server_main.prepare(args)
+
+    assert started_ports == [8001, 8002, 8003]
+    assert processes == [
+        "0.0.0.0:8001:nonce-value",
+        "0.0.0.0:8002:nonce-value",
+        "0.0.0.0:8003:nonce-value",
+    ]

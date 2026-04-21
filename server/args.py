@@ -84,6 +84,24 @@ def dir_path(string: str) -> str:
     return s
 
 
+def positive_int(value: str) -> int:
+    """Validate a positive integer CLI argument.
+
+    Args:
+        value: Raw CLI value.
+
+    Returns:
+        The parsed positive integer.
+
+    Raises:
+        argparse.ArgumentTypeError: Raised when the value is not a positive integer.
+    """
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("Value must be greater than or equal to 1")
+    return parsed
+
+
 def parse_arguments() -> Namespace:
     """Parse CLI arguments for the FastAPI server.
 
@@ -99,6 +117,8 @@ def parse_arguments() -> Namespace:
                         help='Print debug info and save intermediate images in result folder')
     parser.add_argument('--start-instance', action='store_true',
                         help='If a translator should be launched automatically')
+    parser.add_argument('--instances', default=1, type=positive_int,
+                        help='Number of internal translator worker instances to launch (default: 1)')
     parser.add_argument('--ignore-errors', action='store_true', help='Skip image on encountered error.')
     parser.add_argument('--nonce', default=os.getenv('MT_WEB_NONCE') or None, type=str, help='Nonce for securing internal web server communication, set to "None" to disable')
     parser.add_argument('--api-key', default=None, type=str, help='Optional API key used to protect public endpoints')
