@@ -153,6 +153,7 @@ export const MIN_RENDER_WIDTH = 220;
 export const MIN_RENDER_HEIGHT = 220;
 export const MIN_NATURAL_WIDTH = 300;
 export const MIN_NATURAL_HEIGHT = 300;
+export const INITIAL_AUTO_TRANSLATE_SCAN_DELAY_MS = 1200;
 export const MAX_BADGE_TEXT = 32;
 export const MIN_DETECTION_SIZE = 320;
 export const MAX_DETECTION_SIZE = 4096;

@@ -1,6 +1,6 @@
 import { resolveActiveSiteAdapters, resolveSiteAdapterStates } from "../adapters";
 import type { SiteAdapterDefinition, SiteAdapterState } from "../adapters/types";
-import { PROGRESS_TEXT_MAP } from "../config";
+import { INITIAL_AUTO_TRANSLATE_SCAN_DELAY_MS, PROGRESS_TEXT_MAP } from "../config";
 import { TranslationResultCache } from "../cache";
 import { loadSettings, saveSettings } from "../storage";
 import type {
@@ -108,6 +108,8 @@ export class TranslatorController {
 
   private enabled = this.settings.autoTranslateEnabled;
 
+  private discoveryReady = !this.enabled;
+
   private globalShowOriginal = false;
 
   private connection = createConnectionState("尚未连接服务器");
@@ -127,6 +129,10 @@ export class TranslatorController {
   private adapterStates: SiteAdapterState[] = [];
 
   private adapterDomTweaksCleanup: (() => void) | null = null;
+
+  private waitingForInitialAutoScanLoad = false;
+
+  private initialAutoScanTimer: number | null = null;
 
   constructor() {
     this.transport = new TransportClient();
@@ -163,7 +169,7 @@ export class TranslatorController {
     this.rebuildDiscovery();
 
     if (this.enabled) {
-      this.discovery?.rescan();
+      this.scheduleInitialAutoTranslateScan();
     }
 
     this.renderChrome();
@@ -226,11 +232,15 @@ export class TranslatorController {
   private toggleSession(): void {
     this.enabled = !this.enabled;
     if (this.enabled) {
+      this.discoveryReady = true;
+      this.clearInitialAutoTranslateScan();
       this.queue.resume();
       this.discovery?.reset();
       this.discovery?.rescan();
       this.overlay.toast("已启动本页自动翻译。", "neutral");
     } else {
+      this.discoveryReady = false;
+      this.clearInitialAutoTranslateScan();
       this.queue.pause();
       this.overlay.toast("已暂停新任务排队。正在处理的任务会继续完成。", "neutral");
     }
@@ -244,6 +254,8 @@ export class TranslatorController {
       this.queue.resume();
     }
 
+    this.discoveryReady = true;
+    this.clearInitialAutoTranslateScan();
     this.discovery?.reset();
     this.discovery?.rescan();
     this.renderChrome();
@@ -265,7 +277,7 @@ export class TranslatorController {
   }
 
   private handleDiscoveredImage(candidate: DiscoveredImageCandidate): void {
-    if (!this.enabled) {
+    if (!this.enabled || !this.discoveryReady) {
       return;
     }
 
@@ -490,10 +502,14 @@ export class TranslatorController {
     this.rebuildDiscovery();
     this.queue.setMaxConcurrency(this.settings.maxConcurrency);
     this.enabled = this.settings.autoTranslateEnabled;
+    this.clearInitialAutoTranslateScan();
     if (this.enabled) {
+      this.discoveryReady = true;
       this.queue.resume();
+      this.discovery?.reset();
       this.discovery?.rescan();
     } else {
+      this.discoveryReady = false;
       this.queue.pause();
     }
     this.overlay.toast("设置已保存。后续任务将使用新配置。", "neutral");
@@ -511,6 +527,7 @@ export class TranslatorController {
   }
 
   private resetRuntimeState(): void {
+    this.clearInitialAutoTranslateScan();
     this.generation += 1;
     this.queue.reset("canceled");
     for (const entry of this.imageEntries.values()) {
@@ -526,6 +543,52 @@ export class TranslatorController {
     this.imageIds = new WeakMap<HTMLImageElement, string>();
     this.discovery?.reset();
     this.renderImages();
+  }
+
+  private scheduleInitialAutoTranslateScan(): void {
+    this.discoveryReady = false;
+    this.clearInitialAutoTranslateScan();
+
+    if (document.readyState === "complete") {
+      this.startInitialAutoTranslateTimer();
+      return;
+    }
+
+    this.waitingForInitialAutoScanLoad = true;
+    window.addEventListener(
+      "load",
+      this.handleInitialAutoScanLoad,
+      { once: true }
+    );
+  }
+
+  private handleInitialAutoScanLoad = (): void => {
+    this.waitingForInitialAutoScanLoad = false;
+    this.startInitialAutoTranslateTimer();
+  };
+
+  private startInitialAutoTranslateTimer(): void {
+    this.initialAutoScanTimer = window.setTimeout(() => {
+      this.initialAutoScanTimer = null;
+      if (!this.enabled) {
+        return;
+      }
+      this.discoveryReady = true;
+      this.discovery?.reset();
+      this.discovery?.rescan();
+    }, INITIAL_AUTO_TRANSLATE_SCAN_DELAY_MS);
+  }
+
+  private clearInitialAutoTranslateScan(): void {
+    if (this.waitingForInitialAutoScanLoad) {
+      window.removeEventListener("load", this.handleInitialAutoScanLoad);
+      this.waitingForInitialAutoScanLoad = false;
+    }
+
+    if (this.initialAutoScanTimer !== null) {
+      window.clearTimeout(this.initialAutoScanTimer);
+      this.initialAutoScanTimer = null;
+    }
   }
 
   private refreshAdapterState(): void {

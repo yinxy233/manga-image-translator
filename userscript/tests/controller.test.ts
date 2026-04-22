@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { INITIAL_AUTO_TRANSLATE_SCAN_DELAY_MS } from "../src/config";
 import { getManagedImageSourceUrl } from "../src/utils/image";
 
 vi.mock("../src/storage", async () => {
@@ -36,16 +37,24 @@ vi.mock("../src/utils/transport", () => ({
   }
 }));
 
-vi.mock("../src/core/imageDiscovery", () => ({
-  ImageDiscovery: class {
-    start(): void {}
+const { MockImageDiscovery } = vi.hoisted(() => {
+  class HoistedMockImageDiscovery {
+    start = vi.fn();
 
-    stop(): void {}
+    stop = vi.fn();
 
-    reset(): void {}
+    reset = vi.fn();
 
-    rescan(): void {}
+    rescan = vi.fn();
   }
+
+  return {
+    MockImageDiscovery: HoistedMockImageDiscovery
+  };
+});
+
+vi.mock("../src/core/imageDiscovery", () => ({
+  ImageDiscovery: MockImageDiscovery
 }));
 
 vi.mock("../src/core/taskQueue", () => ({
@@ -83,6 +92,8 @@ vi.mock("../src/core/overlayManager", () => ({
 import { TranslatorController } from "../src/core/controller";
 
 interface ControllerInternals {
+  discovery: InstanceType<typeof MockImageDiscovery> | null;
+  discoveryReady: boolean;
   handleDiscoveredImage(candidate: {
     image: HTMLImageElement;
     sourceUrl: string;
@@ -118,6 +129,8 @@ function createImage(src: string): HTMLImageElement {
 
 describe("TranslatorController image presentation", () => {
   beforeEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
     document.body.innerHTML = "";
     if (typeof URL.revokeObjectURL !== "function") {
       Object.defineProperty(URL, "revokeObjectURL", {
@@ -129,6 +142,7 @@ describe("TranslatorController image presentation", () => {
 
   it("restores the original source when runtime state is reset", () => {
     const controller = asControllerInternals(new TranslatorController());
+    controller.discoveryReady = true;
     const image = createImage("https://example.com/original.png");
 
     controller.handleDiscoveredImage({
@@ -151,6 +165,7 @@ describe("TranslatorController image presentation", () => {
 
   it("keeps a replaced image source instead of restoring the previous original", () => {
     const controller = asControllerInternals(new TranslatorController());
+    controller.discoveryReady = true;
     const image = createImage("https://example.com/original.png");
 
     controller.handleDiscoveredImage({
@@ -175,5 +190,25 @@ describe("TranslatorController image presentation", () => {
       "https://example.com/new-page.png"
     );
     expect(getManagedImageSourceUrl(image)).toBe("https://example.com/new-page.png");
+  });
+
+  it("delays the initial auto scan until the page load has settled", () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "readyState", "get").mockReturnValue("interactive");
+
+    const controller = asControllerInternals(new TranslatorController());
+    const discovery = controller.discovery;
+
+    expect(discovery?.rescan).not.toHaveBeenCalled();
+
+    window.dispatchEvent(new Event("load"));
+    vi.advanceTimersByTime(INITIAL_AUTO_TRANSLATE_SCAN_DELAY_MS - 1);
+
+    expect(discovery?.rescan).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1);
+
+    expect(discovery?.reset).toHaveBeenCalledTimes(1);
+    expect(discovery?.rescan).toHaveBeenCalledTimes(1);
   });
 });
