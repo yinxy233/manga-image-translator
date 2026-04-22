@@ -6,10 +6,13 @@ export type TranslatorKey =
   | "caiyun"
   | "sakura"
   | "offline"
+  | "chatgpt"
+  | "chatgpt_2stage"
   | "openai"
   | "deepseek"
   | "groq"
   | "gemini"
+  | "gemini_2stage"
   | "custom_openai"
   | "nllb"
   | "nllb_big"
@@ -21,9 +24,13 @@ export type TranslatorKey =
   | "mbart50"
   | "qwen2"
   | "qwen2_big"
+  | "original"
   | "none";
 
 export type UploadTransport = "multipart" | "base64-json";
+export type DetectorKey = "default" | "dbconvnext" | "ctd" | "craft" | "paddle" | "none";
+export type InpainterKey = "default" | "lama_large" | "lama_mpe" | "sd" | "none" | "original";
+export type RenderDirection = "auto" | "horizontal" | "vertical";
 
 export interface LauncherPosition {
   x: number;
@@ -35,6 +42,14 @@ export interface UserscriptSettings {
   apiKey: string;
   targetLanguage: string;
   translator: TranslatorKey;
+  detector: DetectorKey;
+  detectionSize: number;
+  boxThreshold: number;
+  unclipRatio: number;
+  renderDirection: RenderDirection;
+  inpainter: InpainterKey;
+  inpaintingSize: number;
+  maskDilationOffset: number;
   uploadTransport: UploadTransport;
   autoTranslateEnabled: boolean;
   maxConcurrency: number;

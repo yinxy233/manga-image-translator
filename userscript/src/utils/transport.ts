@@ -19,20 +19,20 @@ interface TranslateImageOptions {
 
 interface TranslationConfigPayload {
   detector: {
-    detector: string;
+    detector: UserscriptSettings["detector"];
     detection_size: number;
     box_threshold: number;
     unclip_ratio: number;
   };
   render: {
-    direction: string;
+    direction: UserscriptSettings["renderDirection"];
   };
   translator: {
     translator: UserscriptSettings["translator"];
     target_lang: string;
   };
   inpainter: {
-    inpainter: string;
+    inpainter: UserscriptSettings["inpainter"];
     inpainting_size: number;
   };
   mask_dilation_offset: number;
@@ -84,23 +84,23 @@ function buildJsonHeaders(settings: UserscriptSettings): Record<string, string> 
 function buildTranslationConfigPayload(settings: UserscriptSettings): TranslationConfigPayload {
   return {
     detector: {
-      detector: "default",
-      detection_size: 1536,
-      box_threshold: 0.7,
-      unclip_ratio: 2.3
+      detector: settings.detector,
+      detection_size: settings.detectionSize,
+      box_threshold: settings.boxThreshold,
+      unclip_ratio: settings.unclipRatio
     },
     render: {
-      direction: "auto"
+      direction: settings.renderDirection
     },
     translator: {
       translator: settings.translator,
       target_lang: settings.targetLanguage
     },
     inpainter: {
-      inpainter: "default",
-      inpainting_size: 2048
+      inpainter: settings.inpainter,
+      inpainting_size: settings.inpaintingSize
     },
-    mask_dilation_offset: 30
+    mask_dilation_offset: settings.maskDilationOffset
   };
 }
 

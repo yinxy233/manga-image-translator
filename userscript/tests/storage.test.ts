@@ -22,6 +22,58 @@ describe("sanitizeSettings", () => {
     expect(settings.uploadTransport).toBe(DEFAULT_SETTINGS.uploadTransport);
   });
 
+  it("keeps valid pipeline and translator settings", () => {
+    const settings = sanitizeSettings({
+      translator: "chatgpt_2stage",
+      targetLanguage: "rus",
+      detector: "ctd",
+      detectionSize: 1792,
+      boxThreshold: 0.35,
+      unclipRatio: 2.8,
+      renderDirection: "vertical",
+      inpainter: "lama_mpe",
+      inpaintingSize: 1024,
+      maskDilationOffset: 12
+    });
+
+    expect(settings.translator).toBe("chatgpt_2stage");
+    expect(settings.targetLanguage).toBe("RUS");
+    expect(settings.detector).toBe("ctd");
+    expect(settings.detectionSize).toBe(1792);
+    expect(settings.boxThreshold).toBe(0.35);
+    expect(settings.unclipRatio).toBe(2.8);
+    expect(settings.renderDirection).toBe("vertical");
+    expect(settings.inpainter).toBe("lama_mpe");
+    expect(settings.inpaintingSize).toBe(1024);
+    expect(settings.maskDilationOffset).toBe(12);
+  });
+
+  it("falls back and clamps invalid pipeline settings", () => {
+    const settings = sanitizeSettings({
+      translator: "invalid-translator" as never,
+      targetLanguage: "invalid-lang",
+      detector: "invalid-detector" as never,
+      detectionSize: 999999,
+      boxThreshold: -1,
+      unclipRatio: Number.NaN,
+      renderDirection: "invalid-direction" as never,
+      inpainter: "invalid-inpainter" as never,
+      inpaintingSize: -100,
+      maskDilationOffset: 999
+    });
+
+    expect(settings.translator).toBe(DEFAULT_SETTINGS.translator);
+    expect(settings.targetLanguage).toBe(DEFAULT_SETTINGS.targetLanguage);
+    expect(settings.detector).toBe(DEFAULT_SETTINGS.detector);
+    expect(settings.detectionSize).toBe(4096);
+    expect(settings.boxThreshold).toBe(0);
+    expect(settings.unclipRatio).toBe(DEFAULT_SETTINGS.unclipRatio);
+    expect(settings.renderDirection).toBe(DEFAULT_SETTINGS.renderDirection);
+    expect(settings.inpainter).toBe(DEFAULT_SETTINGS.inpainter);
+    expect(settings.inpaintingSize).toBe(256);
+    expect(settings.maskDilationOffset).toBe(80);
+  });
+
   it("keeps a valid launcher position", () => {
     const settings = sanitizeSettings({
       launcherPosition: {

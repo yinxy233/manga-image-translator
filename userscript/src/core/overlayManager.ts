@@ -1,4 +1,20 @@
-import { LANGUAGE_OPTIONS, TRANSLATOR_OPTIONS, TRANSPORT_OPTIONS } from "../config";
+import {
+  DEFAULT_SETTINGS,
+  DETECTION_SIZE_OPTIONS,
+  DETECTOR_OPTIONS,
+  INPAINTING_SIZE_OPTIONS,
+  INPAINTER_OPTIONS,
+  LANGUAGE_OPTIONS,
+  MAX_BOX_THRESHOLD,
+  MAX_MASK_DILATION_OFFSET,
+  MAX_UNCLIP_RATIO,
+  MIN_BOX_THRESHOLD,
+  MIN_MASK_DILATION_OFFSET,
+  MIN_UNCLIP_RATIO,
+  RENDER_DIRECTION_OPTIONS,
+  TRANSLATOR_OPTIONS,
+  TRANSPORT_OPTIONS
+} from "../config";
 import type {
   ConnectionState,
   LauncherPosition,
@@ -49,6 +65,12 @@ interface LauncherDragState {
   originX: number;
   originY: number;
   moved: boolean;
+}
+
+interface SettingsSectionOptions {
+  title: string;
+  content: HTMLElement;
+  open?: boolean;
 }
 
 const STYLE_TEXT = `
@@ -332,6 +354,8 @@ const STYLE_TEXT = `
     right: max(12px, env(safe-area-inset-right));
     bottom: max(12px, env(safe-area-inset-bottom));
     width: 328px;
+    max-height: calc(100vh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    max-height: calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
     pointer-events: auto;
     padding: 16px;
     border-radius: 14px;
@@ -340,6 +364,9 @@ const STYLE_TEXT = `
     box-shadow: 0 14px 36px rgba(0, 0, 0, 0.16);
     border: 1px solid #e5e7eb;
     transition: opacity 160ms ease, transform 160ms ease;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
 
   .mit-dock[data-collapsed="true"] {
@@ -353,6 +380,10 @@ const STYLE_TEXT = `
     align-items: center;
     justify-content: space-between;
     gap: 12px;
+  }
+
+  .mit-title-copy {
+    min-width: 0;
   }
 
   .mit-title h1 {
@@ -374,16 +405,38 @@ const STYLE_TEXT = `
     color: #4b5563;
   }
 
-  .mit-controls,
+  .mit-dock-body {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+    margin-top: 12px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-right: 4px;
+    scrollbar-gutter: stable;
+  }
+
+  .mit-controls {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .mit-controls .mit-btn {
+    min-width: 0;
+    padding-inline: 10px;
+  }
+
   .mit-stats {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 8px;
-    margin-top: 12px;
   }
 
   .mit-stat-card {
-    padding: 10px 12px;
+    padding: 8px 10px;
     border-radius: 10px;
     background: #f9fafb;
     border: 1px solid #e5e7eb;
@@ -406,7 +459,6 @@ const STYLE_TEXT = `
     display: flex;
     align-items: center;
     justify-content: center;
-    margin-top: 12px;
     padding: 10px 12px;
     border-radius: 10px;
     font-size: 12px;
@@ -582,22 +634,74 @@ const STYLE_TEXT = `
   }
 
   .mit-settings {
-    margin-top: 12px;
     padding: 14px;
     border-radius: 10px;
     background: #f9fafb;
     border: 1px solid #e5e7eb;
     display: none;
+    flex-direction: column;
+    gap: 10px;
   }
 
   .mit-settings[data-open="true"] {
+    display: flex;
+  }
+
+  .mit-settings-section {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .mit-section-toggle {
+    appearance: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid #e5e7eb;
+    background: #ffffff;
+    color: #111827;
+    cursor: pointer;
+    transition: background 140ms ease, border-color 140ms ease;
+  }
+
+  .mit-section-toggle:hover {
+    background: #f3f4f6;
+    border-color: #d1d5db;
+  }
+
+  .mit-section-label {
+    font-size: 13px;
+    font-weight: 800;
+  }
+
+  .mit-section-icon {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    transition: transform 160ms ease;
+  }
+
+  .mit-settings-section[data-open="true"] .mit-section-icon {
+    transform: rotate(180deg);
+  }
+
+  .mit-section-body {
+    display: none;
+  }
+
+  .mit-settings-section[data-open="true"] .mit-section-body {
     display: block;
   }
 
   .mit-settings-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
   }
 
   .mit-field {
@@ -627,6 +731,11 @@ const STYLE_TEXT = `
     font-size: 13px;
   }
 
+  .mit-secret-input {
+    -webkit-text-security: disc;
+    text-security: disc;
+  }
+
   .mit-input::placeholder {
     color: #9ca3af;
   }
@@ -652,7 +761,18 @@ const STYLE_TEXT = `
   .mit-settings-actions {
     display: flex;
     gap: 10px;
-    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid #e5e7eb;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.98));
+  }
+
+  .mit-settings-actions[data-visible="false"] {
+    display: none;
+  }
+
+  .mit-settings-actions .mit-btn {
+    width: 100%;
+    min-height: 40px;
   }
 
   .mit-toast-layer {
@@ -691,7 +811,7 @@ const STYLE_TEXT = `
     padding: 0;
   }
 
-  @media (pointer: coarse), (max-width: 720px) {
+  @media (pointer: coarse) {
     .mit-btn {
       min-height: 42px;
       font-size: 13px;
@@ -730,18 +850,22 @@ const STYLE_TEXT = `
     }
 
     .mit-dock {
+      padding: 15px;
+    }
+
+    .mit-input,
+    .mit-select,
+    .mit-switch {
+      min-height: 42px;
+    }
+  }
+
+  @media (max-width: 720px) {
+    .mit-dock {
       left: 12px;
       right: 12px;
       bottom: max(12px, env(safe-area-inset-bottom));
       width: auto;
-    }
-
-    .mit-controls {
-      grid-template-columns: 1fr;
-    }
-
-    .mit-settings-grid {
-      grid-template-columns: 1fr;
     }
 
     .mit-status-card {
@@ -760,6 +884,57 @@ const STYLE_TEXT = `
       bottom: auto;
     }
   }
+
+  @media (max-width: 520px) {
+    .mit-stats,
+    .mit-settings-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 420px) {
+    .mit-title {
+      align-items: flex-start;
+    }
+
+    .mit-subtitle {
+      display: none;
+    }
+
+    .mit-settings-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-height: 820px) {
+    .mit-dock {
+      padding: 14px;
+    }
+
+    .mit-title {
+      gap: 8px;
+    }
+
+    .mit-subtitle {
+      display: none;
+    }
+
+    .mit-dock-body {
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .mit-stat-card {
+      padding: 7px 9px;
+    }
+
+    .mit-status-pill,
+    .mit-settings,
+    .mit-section-toggle {
+      padding-top: 9px;
+      padding-bottom: 9px;
+    }
+  }
 `;
 
 export class OverlayManager {
@@ -776,6 +951,8 @@ export class OverlayManager {
   private readonly toastLayer: HTMLDivElement;
 
   private readonly settingsPanel: HTMLDivElement;
+
+  private readonly settingsFooter: HTMLDivElement;
 
   private readonly launcherGroup: HTMLDivElement;
 
@@ -810,6 +987,22 @@ export class OverlayManager {
   private readonly translatorSelect: HTMLSelectElement;
 
   private readonly languageSelect: HTMLSelectElement;
+
+  private readonly detectorSelect: HTMLSelectElement;
+
+  private readonly detectionSizeInput: HTMLSelectElement;
+
+  private readonly boxThresholdInput: HTMLInputElement;
+
+  private readonly unclipRatioInput: HTMLInputElement;
+
+  private readonly renderDirectionSelect: HTMLSelectElement;
+
+  private readonly inpainterSelect: HTMLSelectElement;
+
+  private readonly inpaintingSizeInput: HTMLSelectElement;
+
+  private readonly maskDilationOffsetInput: HTMLInputElement;
 
   private readonly transportSelect: HTMLSelectElement;
 
@@ -886,11 +1079,20 @@ export class OverlayManager {
     this.apiKeyInput = document.createElement("input");
     this.translatorSelect = document.createElement("select");
     this.languageSelect = document.createElement("select");
+    this.detectorSelect = document.createElement("select");
+    this.detectionSizeInput = document.createElement("select");
+    this.boxThresholdInput = document.createElement("input");
+    this.unclipRatioInput = document.createElement("input");
+    this.renderDirectionSelect = document.createElement("select");
+    this.inpainterSelect = document.createElement("select");
+    this.inpaintingSizeInput = document.createElement("select");
+    this.maskDilationOffsetInput = document.createElement("input");
     this.transportSelect = document.createElement("select");
     this.autoCheckbox = document.createElement("input");
     this.concurrencyInput = document.createElement("input");
 
     this.settingsPanel = this.buildSettingsPanel(settings);
+    this.settingsFooter = this.buildSettingsFooter();
     this.dock.append(...this.buildDockContent());
 
     root.append(this.overlayLayer, this.dock, this.launcherGroup, this.toastLayer);
@@ -924,6 +1126,20 @@ export class OverlayManager {
     this.apiKeyInput.value = settings.apiKey;
     this.translatorSelect.value = settings.translator;
     this.languageSelect.value = settings.targetLanguage;
+    this.detectorSelect.value = settings.detector;
+    this.detectionSizeInput.value = String(settings.detectionSize);
+    if (!this.detectionSizeInput.value) {
+      this.detectionSizeInput.value = String(DEFAULT_SETTINGS.detectionSize);
+    }
+    this.boxThresholdInput.value = String(settings.boxThreshold);
+    this.unclipRatioInput.value = String(settings.unclipRatio);
+    this.renderDirectionSelect.value = settings.renderDirection;
+    this.inpainterSelect.value = settings.inpainter;
+    this.inpaintingSizeInput.value = String(settings.inpaintingSize);
+    if (!this.inpaintingSizeInput.value) {
+      this.inpaintingSizeInput.value = String(DEFAULT_SETTINGS.inpaintingSize);
+    }
+    this.maskDilationOffsetInput.value = String(settings.maskDilationOffset);
     this.transportSelect.value = settings.uploadTransport;
     this.autoCheckbox.checked = settings.autoTranslateEnabled;
     this.concurrencyInput.value = String(settings.maxConcurrency);
@@ -1008,11 +1224,12 @@ export class OverlayManager {
     title.className = "mit-title";
 
     const titleBlock = document.createElement("div");
+    titleBlock.className = "mit-title-copy";
     const heading = document.createElement("h1");
     heading.textContent = "漫画翻译";
     const subtitle = document.createElement("p");
     subtitle.className = "mit-subtitle";
-    subtitle.textContent = "点击开始后，当前页和后续图片会自动加入翻译队列。";
+    subtitle.textContent = "点击开始后，当前页和后续图片会自动加入队列。";
     titleBlock.append(heading, subtitle);
 
     const titleActions = document.createElement("div");
@@ -1034,7 +1251,11 @@ export class OverlayManager {
       this.createStatCard("错误", this.errorValue)
     );
 
-    return [title, controls, stats, this.connectionPill, this.settingsPanel];
+    const body = document.createElement("div");
+    body.className = "mit-dock-body";
+    body.append(controls, stats, this.connectionPill, this.settingsPanel);
+
+    return [title, body, this.settingsFooter];
   }
 
   private bindControls(): void {
@@ -1099,6 +1320,7 @@ export class OverlayManager {
   private setSettingsOpen(open: boolean): void {
     this.settingsOpen = open;
     this.settingsPanel.dataset.open = String(open);
+    this.settingsFooter.dataset.visible = String(open);
     const settingsLabel = open ? "收起设置" : "展开设置";
     this.settingsButton.title = settingsLabel;
     this.settingsButton.setAttribute("aria-label", settingsLabel);
@@ -1147,15 +1369,27 @@ export class OverlayManager {
     panel.className = "mit-settings";
     panel.dataset.open = "false";
 
-    const grid = document.createElement("div");
-    grid.className = "mit-settings-grid";
-
     this.serverInput.className = "mit-input";
     this.serverInput.placeholder = "https://translator.example.com";
+    this.serverInput.name = "mit-server-url";
+    this.serverInput.autocomplete = "off";
+    this.serverInput.spellcheck = false;
+    this.serverInput.inputMode = "url";
+    this.serverInput.setAttribute("autocapitalize", "off");
+    this.serverInput.setAttribute("autocorrect", "off");
 
     this.apiKeyInput.className = "mit-input";
-    this.apiKeyInput.placeholder = "可选 API Key";
-    this.apiKeyInput.type = "password";
+    this.apiKeyInput.classList.add("mit-secret-input");
+    this.apiKeyInput.placeholder = "可选接口密钥";
+    this.apiKeyInput.type = "text";
+    this.apiKeyInput.name = "mit-api-key";
+    this.apiKeyInput.autocomplete = "off";
+    this.apiKeyInput.spellcheck = false;
+    this.apiKeyInput.setAttribute("autocapitalize", "off");
+    this.apiKeyInput.setAttribute("autocorrect", "off");
+    this.apiKeyInput.setAttribute("data-form-type", "other");
+    this.apiKeyInput.setAttribute("data-lpignore", "true");
+    this.apiKeyInput.setAttribute("data-1p-ignore", "true");
 
     this.translatorSelect.className = "mit-select";
     for (const option of TRANSLATOR_OPTIONS) {
@@ -1173,6 +1407,46 @@ export class OverlayManager {
       this.languageSelect.appendChild(element);
     }
 
+    this.detectorSelect.className = "mit-select";
+    for (const option of DETECTOR_OPTIONS) {
+      const element = document.createElement("option");
+      element.value = option.value;
+      element.textContent = option.label;
+      this.detectorSelect.appendChild(element);
+    }
+
+    this.renderDirectionSelect.className = "mit-select";
+    for (const option of RENDER_DIRECTION_OPTIONS) {
+      const element = document.createElement("option");
+      element.value = option.value;
+      element.textContent = option.label;
+      this.renderDirectionSelect.appendChild(element);
+    }
+
+    this.inpainterSelect.className = "mit-select";
+    for (const option of INPAINTER_OPTIONS) {
+      const element = document.createElement("option");
+      element.value = option.value;
+      element.textContent = option.label;
+      this.inpainterSelect.appendChild(element);
+    }
+
+    this.detectionSizeInput.className = "mit-select";
+    for (const option of DETECTION_SIZE_OPTIONS) {
+      const element = document.createElement("option");
+      element.value = String(option.value);
+      element.textContent = option.label;
+      this.detectionSizeInput.appendChild(element);
+    }
+
+    this.inpaintingSizeInput.className = "mit-select";
+    for (const option of INPAINTING_SIZE_OPTIONS) {
+      const element = document.createElement("option");
+      element.value = String(option.value);
+      element.textContent = option.label;
+      this.inpaintingSizeInput.appendChild(element);
+    }
+
     this.transportSelect.className = "mit-select";
     for (const option of TRANSPORT_OPTIONS) {
       const element = document.createElement("option");
@@ -1182,43 +1456,115 @@ export class OverlayManager {
     }
 
     this.autoCheckbox.type = "checkbox";
+    this.boxThresholdInput.type = "number";
+    this.boxThresholdInput.min = String(MIN_BOX_THRESHOLD);
+    this.boxThresholdInput.max = String(MAX_BOX_THRESHOLD);
+    this.boxThresholdInput.step = "0.01";
+    this.boxThresholdInput.className = "mit-input";
+    this.unclipRatioInput.type = "number";
+    this.unclipRatioInput.min = String(MIN_UNCLIP_RATIO);
+    this.unclipRatioInput.max = String(MAX_UNCLIP_RATIO);
+    this.unclipRatioInput.step = "0.1";
+    this.unclipRatioInput.className = "mit-input";
+    this.maskDilationOffsetInput.type = "number";
+    this.maskDilationOffsetInput.min = String(MIN_MASK_DILATION_OFFSET);
+    this.maskDilationOffsetInput.max = String(MAX_MASK_DILATION_OFFSET);
+    this.maskDilationOffsetInput.step = "1";
+    this.maskDilationOffsetInput.className = "mit-input";
     this.concurrencyInput.type = "number";
     this.concurrencyInput.min = "1";
     this.concurrencyInput.max = "6";
     this.concurrencyInput.className = "mit-input";
 
-    grid.append(
-      this.createField("Server URL", this.serverInput, true),
-      this.createField("API Key", this.apiKeyInput, true),
-      this.createField("Translator", this.translatorSelect),
-      this.createField("Target", this.languageSelect),
-      this.createField("Upload", this.transportSelect),
-      this.createSwitchField("Auto Start", this.autoCheckbox),
-      this.createField("Concurrency", this.concurrencyInput)
+    const connectionGrid = document.createElement("div");
+    connectionGrid.className = "mit-settings-grid";
+    connectionGrid.append(
+      this.createField("服务地址", this.serverInput, true),
+      this.createField("接口密钥", this.apiKeyInput, true)
     );
 
-    const actions = document.createElement("div");
-    actions.className = "mit-settings-actions";
+    const translationGrid = document.createElement("div");
+    translationGrid.className = "mit-settings-grid";
+    translationGrid.append(
+      this.createField("翻译引擎", this.translatorSelect),
+      this.createField("目标语言", this.languageSelect)
+    );
 
-    const saveButton = this.createButton("保存设置", "primary");
-    saveButton.addEventListener("click", () => {
-      this.callbacks.onSaveSettings({
-        serverBaseUrl: this.serverInput.value.trim(),
-        apiKey: this.apiKeyInput.value,
-        translator: this.translatorSelect.value as UserscriptSettings["translator"],
-        targetLanguage: this.languageSelect.value,
-        uploadTransport: this.transportSelect.value as UserscriptSettings["uploadTransport"],
-        autoTranslateEnabled: this.autoCheckbox.checked,
-        maxConcurrency: Number(this.concurrencyInput.value),
-        launcherPosition: this.launcherPosition
-      });
-    });
+    const pipelineGrid = document.createElement("div");
+    pipelineGrid.className = "mit-settings-grid";
+    pipelineGrid.append(
+      this.createField("检测器", this.detectorSelect),
+      this.createField("检测尺寸", this.detectionSizeInput),
+      this.createField("框阈值", this.boxThresholdInput),
+      this.createField("轮廓扩张", this.unclipRatioInput),
+      this.createField("排版方向", this.renderDirectionSelect),
+      this.createField("修复器", this.inpainterSelect),
+      this.createField("修复尺寸", this.inpaintingSizeInput),
+      this.createField("遮罩膨胀", this.maskDilationOffsetInput)
+    );
 
-    actions.append(saveButton);
-    panel.append(grid, actions);
+    const advancedGrid = document.createElement("div");
+    advancedGrid.className = "mit-settings-grid";
+    advancedGrid.append(
+      this.createField("上传方式", this.transportSelect),
+      this.createSwitchField("自动启动", this.autoCheckbox, true),
+      this.createField("并发上限", this.concurrencyInput)
+    );
+
+    panel.append(
+      this.createSettingsSection({
+        title: "连接",
+        content: connectionGrid
+      }),
+      this.createSettingsSection({
+        title: "翻译",
+        content: translationGrid
+      }),
+      this.createSettingsSection({
+        title: "处理流程",
+        content: pipelineGrid
+      }),
+      this.createSettingsSection({
+        title: "高级",
+        content: advancedGrid
+      })
+    );
 
     this.updateSettings(settings);
     return panel;
+  }
+
+  private buildSettingsFooter(): HTMLDivElement {
+    const footer = document.createElement("div");
+    footer.className = "mit-settings-actions";
+    footer.dataset.visible = "false";
+
+    const saveButton = this.createButton("保存设置", "primary");
+    saveButton.addEventListener("click", () => this.saveSettings());
+
+    footer.append(saveButton);
+    return footer;
+  }
+
+  private saveSettings(): void {
+    this.callbacks.onSaveSettings({
+      serverBaseUrl: this.serverInput.value.trim(),
+      apiKey: this.apiKeyInput.value,
+      translator: this.translatorSelect.value as UserscriptSettings["translator"],
+      targetLanguage: this.languageSelect.value,
+      detector: this.detectorSelect.value as UserscriptSettings["detector"],
+      detectionSize: Number(this.detectionSizeInput.value),
+      boxThreshold: Number(this.boxThresholdInput.value),
+      unclipRatio: Number(this.unclipRatioInput.value),
+      renderDirection: this.renderDirectionSelect.value as UserscriptSettings["renderDirection"],
+      inpainter: this.inpainterSelect.value as UserscriptSettings["inpainter"],
+      inpaintingSize: Number(this.inpaintingSizeInput.value),
+      maskDilationOffset: Number(this.maskDilationOffsetInput.value),
+      uploadTransport: this.transportSelect.value as UserscriptSettings["uploadTransport"],
+      autoTranslateEnabled: this.autoCheckbox.checked,
+      maxConcurrency: Number(this.concurrencyInput.value),
+      launcherPosition: this.launcherPosition
+    });
   }
 
   private createField(
@@ -1238,9 +1584,12 @@ export class OverlayManager {
     return field;
   }
 
-  private createSwitchField(label: string, checkbox: HTMLInputElement): HTMLDivElement {
+  private createSwitchField(label: string, checkbox: HTMLInputElement, fullWidth = false): HTMLDivElement {
     const field = document.createElement("div");
     field.className = "mit-field";
+    if (fullWidth) {
+      field.dataset.full = "true";
+    }
 
     const labelNode = document.createElement("label");
     labelNode.textContent = label;
@@ -1254,6 +1603,35 @@ export class OverlayManager {
     switchContainer.append(caption, checkbox);
     field.append(labelNode, switchContainer);
     return field;
+  }
+
+  private createSettingsSection(options: SettingsSectionOptions): HTMLDivElement {
+    const section = document.createElement("div");
+    section.className = "mit-settings-section";
+    section.dataset.open = String(options.open ?? false);
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "mit-section-toggle";
+    toggle.setAttribute("aria-expanded", String(options.open ?? false));
+
+    const label = document.createElement("span");
+    label.className = "mit-section-label";
+    label.textContent = options.title;
+
+    toggle.append(label, createChevronIcon("mit-section-icon"));
+    toggle.addEventListener("click", () => {
+      const nextOpen = section.dataset.open !== "true";
+      section.dataset.open = String(nextOpen);
+      toggle.setAttribute("aria-expanded", String(nextOpen));
+    });
+
+    const body = document.createElement("div");
+    body.className = "mit-section-body";
+    body.append(options.content);
+
+    section.append(toggle, body);
+    return section;
   }
 
   private createOverlayItem(id: string): OverlayItemRefs {
@@ -1497,6 +1875,24 @@ function createGearIcon(className: string): SVGSVGElement {
   inner.setAttribute("r", "3.1");
 
   svg.append(outer, inner);
+  return svg;
+}
+
+function createChevronIcon(className: string): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NAMESPACE, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.8");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("class", className);
+
+  const path = document.createElementNS(SVG_NAMESPACE, "path");
+  path.setAttribute("d", "m6 9 6 6 6-6");
+
+  svg.append(path);
   return svg;
 }
 

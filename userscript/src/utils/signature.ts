@@ -18,7 +18,15 @@ export function buildConfigSignature(settings: UserscriptSettings): string {
   return JSON.stringify({
     serverBaseUrl: normalizeBaseUrl(settings.serverBaseUrl),
     targetLanguage: settings.targetLanguage,
-    translator: settings.translator
+    translator: settings.translator,
+    detector: settings.detector,
+    detectionSize: settings.detectionSize,
+    boxThreshold: settings.boxThreshold,
+    unclipRatio: settings.unclipRatio,
+    renderDirection: settings.renderDirection,
+    inpainter: settings.inpainter,
+    inpaintingSize: settings.inpaintingSize,
+    maskDilationOffset: settings.maskDilationOffset
   });
 }
 

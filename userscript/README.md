@@ -97,6 +97,15 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - `apiKey`
 - `targetLanguage`
 - `translator`
+- `detector`
+- `detectionSize`
+- `boxThreshold`
+- `unclipRatio`
+- `renderDirection`
+- `inpainter`
+- `inpaintingSize`
+- `maskDilationOffset`
+- `uploadTransport`
 - `autoTranslateEnabled`
 - `maxConcurrency`
 
@@ -106,7 +115,29 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - `apiKey`: 与 `--api-key` 或 `MT_PUBLIC_API_KEY` 一致
 - `targetLanguage`: `CHS`
 - `translator`: `youdao`
+- `detector`: `default`
+- `detectionSize`: `1536`
+- `boxThreshold`: `0.7`
+- `unclipRatio`: `2.3`
+- `renderDirection`: `auto`
+- `inpainter`: `default`
+- `inpaintingSize`: `2048`
+- `maskDilationOffset`: `30`
+- `uploadTransport`: `multipart`
 - `maxConcurrency`: `2`
+
+这些参数会映射到服务端 `config`：
+
+- `detector` -> `config.detector.detector`
+- `detectionSize` -> `config.detector.detection_size`
+- `boxThreshold` -> `config.detector.box_threshold`
+- `unclipRatio` -> `config.detector.unclip_ratio`
+- `renderDirection` -> `config.render.direction`
+- `inpainter` -> `config.inpainter.inpainter`
+- `inpaintingSize` -> `config.inpainter.inpainting_size`
+- `maskDilationOffset` -> `config.mask_dilation_offset`
+
+其中 `detectionSize` 和 `inpaintingSize` 在设置面板中使用预设下拉选项，避免手动输入异常值。
 
 如果你希望多张图片同时翻译，需要同时满足两点：
 

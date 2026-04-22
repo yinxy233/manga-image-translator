@@ -113,7 +113,15 @@ describe("TransportClient", () => {
 
     const settings = {
       ...DEFAULT_SETTINGS,
-      uploadTransport: "base64-json" as const
+      uploadTransport: "base64-json" as const,
+      detector: "ctd" as const,
+      detectionSize: 1664,
+      boxThreshold: 0.45,
+      unclipRatio: 2.7,
+      renderDirection: "vertical" as const,
+      inpainter: "lama_mpe" as const,
+      inpaintingSize: 1536,
+      maskDilationOffset: 18
     };
 
     const result = await transport.translateImage({
@@ -129,9 +137,23 @@ describe("TransportClient", () => {
     const body = JSON.parse(String(requestInit.body)) as {
       image: string;
       config: {
+        detector: {
+          detector: string;
+          detection_size: number;
+          box_threshold: number;
+          unclip_ratio: number;
+        };
+        render: {
+          direction: string;
+        };
         translator: {
           target_lang: string;
         };
+        inpainter: {
+          inpainter: string;
+          inpainting_size: number;
+        };
+        mask_dilation_offset: number;
       };
     };
 
@@ -140,6 +162,18 @@ describe("TransportClient", () => {
     expect(requestInit.headers).toMatchObject({ "Content-Type": "application/json" });
     expect(body.image.startsWith("data:image/png;base64,")).toBe(true);
     expect(body.config.translator.target_lang).toBe("CHS");
+    expect(body.config.detector).toMatchObject({
+      detector: "ctd",
+      detection_size: 1664,
+      box_threshold: 0.45,
+      unclip_ratio: 2.7
+    });
+    expect(body.config.render.direction).toBe("vertical");
+    expect(body.config.inpainter).toMatchObject({
+      inpainter: "lama_mpe",
+      inpainting_size: 1536
+    });
+    expect(body.config.mask_dilation_offset).toBe(18);
     expect(gmRequest).not.toHaveBeenCalled();
   });
 

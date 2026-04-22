@@ -96,6 +96,7 @@ describe("OverlayManager", () => {
 
     const dock = overlay.shadowRoot.querySelector(".mit-dock") as HTMLDivElement;
     const settingsPanel = overlay.shadowRoot.querySelector(".mit-settings") as HTMLDivElement;
+    const settingsFooter = overlay.shadowRoot.querySelector(".mit-settings-actions") as HTMLDivElement;
     const launcherGroup = overlay.shadowRoot.querySelector(".mit-launcher-group") as HTMLDivElement;
     const translateLauncher = overlay.shadowRoot.querySelector(
       '.mit-launcher-button[data-kind="translate"]'
@@ -106,6 +107,7 @@ describe("OverlayManager", () => {
 
     expect(dock.dataset.collapsed).toBe("true");
     expect(launcherGroup.dataset.open).toBe("false");
+    expect(settingsFooter.dataset.visible).toBe("false");
     expect(translateLauncher.textContent).toBe("译");
     expect(settingsLauncher.querySelector("svg")).not.toBeNull();
 
@@ -116,7 +118,103 @@ describe("OverlayManager", () => {
     settingsLauncher.click();
     expect(dock.dataset.collapsed).toBe("false");
     expect(settingsPanel.dataset.open).toBe("true");
+    expect(settingsFooter.dataset.visible).toBe("true");
     expect(launcherGroup.dataset.open).toBe("true");
+
+    overlay.destroy();
+  });
+
+  it("groups settings into collapsible sections and keeps save actions outside the scroll body", () => {
+    const onSaveSettings = vi.fn();
+    const overlay = new OverlayManager(DEFAULT_SETTINGS, {
+      onTranslateNow: vi.fn(),
+      onLauncherPositionChange: vi.fn(),
+      onToggleSession: vi.fn(),
+      onToggleGlobalOriginal: vi.fn(),
+      onTestConnection: vi.fn(),
+      onSaveSettings,
+      onToggleImageOriginal: vi.fn(),
+      onRetryImage: vi.fn(),
+      onCancelImage: vi.fn(),
+      onIgnoreImage: vi.fn()
+    });
+
+    const settingsLauncher = overlay.shadowRoot.querySelector(
+      '.mit-launcher-button[data-kind="settings"]'
+    ) as HTMLButtonElement;
+    settingsLauncher.click();
+
+    const dock = overlay.shadowRoot.querySelector(".mit-dock") as HTMLDivElement;
+    const dockBody = overlay.shadowRoot.querySelector(".mit-dock-body") as HTMLDivElement;
+    const settingsPanel = overlay.shadowRoot.querySelector(".mit-settings") as HTMLDivElement;
+    const settingsFooter = overlay.shadowRoot.querySelector(".mit-settings-actions") as HTMLDivElement;
+    const sectionLabels = Array.from(
+      overlay.shadowRoot.querySelectorAll(".mit-section-label"),
+      (node) => node.textContent
+    );
+    const fieldLabels = Array.from(
+      overlay.shadowRoot.querySelectorAll(".mit-field label"),
+      (node) => node.textContent
+    );
+    const sections = overlay.shadowRoot.querySelectorAll(".mit-settings-section");
+    const advancedSection = sections[3] as HTMLDivElement;
+    const advancedToggle = advancedSection.querySelector(".mit-section-toggle") as HTMLButtonElement;
+
+    expect(dock.contains(dockBody)).toBe(true);
+    expect(dock.contains(settingsFooter)).toBe(true);
+    expect(settingsPanel.contains(settingsFooter)).toBe(false);
+    expect(sectionLabels).toEqual(["连接", "翻译", "处理流程", "高级"]);
+    expect(fieldLabels).toEqual(
+      expect.arrayContaining([
+        "服务地址",
+        "接口密钥",
+        "翻译引擎",
+        "目标语言",
+        "检测器",
+        "检测尺寸",
+        "框阈值",
+        "轮廓扩张",
+        "排版方向",
+        "修复器",
+        "修复尺寸",
+        "遮罩膨胀",
+        "上传方式",
+        "自动启动",
+        "并发上限"
+      ])
+    );
+    expect((sections[0] as HTMLDivElement).dataset.open).toBe("false");
+    expect((sections[1] as HTMLDivElement).dataset.open).toBe("false");
+    expect((sections[2] as HTMLDivElement).dataset.open).toBe("false");
+    expect(advancedSection.dataset.open).toBe("false");
+
+    advancedToggle.click();
+    expect(advancedSection.dataset.open).toBe("true");
+    expect(advancedToggle.getAttribute("aria-expanded")).toBe("true");
+
+    const serverInput = overlay.shadowRoot.querySelector('input[placeholder="https://translator.example.com"]') as HTMLInputElement;
+    const apiKeyInput = overlay.shadowRoot.querySelector('input[placeholder="可选接口密钥"]') as HTMLInputElement;
+    const concurrencyInput = overlay.shadowRoot.querySelector(
+      'input[type="number"][min="1"][max="6"]'
+    ) as HTMLInputElement;
+    const saveButton = settingsFooter.querySelector(".mit-btn") as HTMLButtonElement;
+
+    expect(serverInput.autocomplete).toBe("off");
+    expect(serverInput.getAttribute("autocapitalize")).toBe("off");
+    expect(apiKeyInput.type).toBe("text");
+    expect(apiKeyInput.autocomplete).toBe("off");
+    expect(apiKeyInput.getAttribute("data-lpignore")).toBe("true");
+
+    serverInput.value = " https://translator.internal ";
+    concurrencyInput.value = "4";
+    saveButton.click();
+
+    expect(onSaveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        serverBaseUrl: "https://translator.internal",
+        maxConcurrency: 4
+      })
+    );
 
     overlay.destroy();
   });
