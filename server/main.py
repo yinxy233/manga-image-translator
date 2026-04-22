@@ -47,6 +47,25 @@ if RESULT_ROOT.exists():
     app.mount("/result", StaticFiles(directory=str(RESULT_ROOT)), name="result")
 
 
+def build_health_payload() -> dict[str, object]:
+    """Build the public health payload for browser clients.
+
+    Returns:
+        Health details used by userscript capability detection and queue hints.
+    """
+    return {
+        "status": "ok",
+        "version": server_settings.version,
+        "queue_size": len(task_queue.queue),
+        "total_instances": len(executor_instances.list),
+        "free_instances": executor_instances.free_executors(),
+        "capabilities": {
+            "web_result_fastpath": True,
+            "source_url_translation": True,
+        },
+    }
+
+
 @app.middleware("http")
 async def public_api_key_middleware(request: Request, call_next):
     """Protect selected public endpoints with an optional API key.
@@ -74,17 +93,13 @@ async def register_instance(instance: ExecutorInstance, req: Request, req_nonce:
 
 
 @app.get("/health", tags=["api"])
-async def health() -> dict[str, int | str]:
+async def health() -> dict[str, object]:
     """Return the public health status for remote clients.
 
     Returns:
         A compact status payload used by the userscript and remote probes.
     """
-    return {
-        "status": "ok",
-        "version": server_settings.version,
-        "queue_size": len(task_queue.queue),
-    }
+    return build_health_payload()
 
 def transform_to_image(ctx):
     # 检查是否使用占位符（在web模式下final.png保存后会设置此标记）
@@ -134,6 +149,13 @@ async def stream_bytes(req: Request, data: TranslateRequest)-> StreamingResponse
 
 @app.post("/translate/image/stream", response_class=StreamingResponse, tags=["api", "json"], response_description="A stream over elements with strucure(1byte status, 4 byte size, n byte data) status code are 0,1,2,3,4 0 is result data, 1 is progress report, 2 is error, 3 is waiting queue position, 4 is waiting for translator instance")
 async def stream_image(req: Request, data: TranslateRequest) -> StreamingResponse:
+    return await while_streaming(req, transform_to_image, data.config, data.image)
+
+
+@app.post("/translate/image/stream/web", response_class=StreamingResponse, tags=["api", "json"], response_description="Web frontend optimized JSON streaming endpoint - uses placeholder optimization for faster response.")
+async def stream_image_web(req: Request, data: TranslateRequest) -> StreamingResponse:
+    """Return the JSON streaming image response with Web fast-path enabled."""
+    data.config._web_frontend_optimized = True
     return await while_streaming(req, transform_to_image, data.config, data.image)
 
 @app.post("/translate/with-form/json", response_model=TranslationResponse, tags=["api", "form"],response_description="json strucure inspired by the ichigo translator extension")

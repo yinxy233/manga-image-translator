@@ -28,6 +28,7 @@ export type TranslatorKey =
   | "none";
 
 export type UploadTransport = "multipart" | "base64-json";
+export type SourceTransferMode = "auto" | "blob-upload" | "remote-url";
 export type DetectorKey = "default" | "dbconvnext" | "ctd" | "craft" | "paddle" | "none";
 export type InpainterKey = "default" | "lama_large" | "lama_mpe" | "sd" | "none" | "original";
 export type RenderDirection = "auto" | "horizontal" | "vertical";
@@ -52,6 +53,7 @@ export interface UserscriptSettings {
   inpaintingSize: number;
   maskDilationOffset: number;
   uploadTransport: UploadTransport;
+  sourceTransferMode: SourceTransferMode;
   autoTranslateEnabled: boolean;
   cacheEnabled: boolean;
   maxConcurrency: number;
@@ -59,10 +61,18 @@ export interface UserscriptSettings {
   adapterOverrides: AdapterOverrides;
 }
 
+export interface HealthCapabilities {
+  web_result_fastpath?: boolean;
+  source_url_translation?: boolean;
+}
+
 export interface HealthPayload {
   status: string;
   version: string;
   queue_size: number;
+  total_instances?: number;
+  free_instances?: number;
+  capabilities?: HealthCapabilities;
 }
 
 export type SharedTaskStatus =

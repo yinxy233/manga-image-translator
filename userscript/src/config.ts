@@ -1,5 +1,5 @@
 import { buildDefaultAdapterOverrides } from "./adapters";
-import type { TranslatorKey, UserscriptSettings } from "./types";
+import type { SourceTransferMode, TranslatorKey, UserscriptSettings } from "./types";
 
 export const DEFAULT_SETTINGS: UserscriptSettings = {
   serverBaseUrl: "http://127.0.0.1:8000",
@@ -15,6 +15,7 @@ export const DEFAULT_SETTINGS: UserscriptSettings = {
   inpaintingSize: 2048,
   maskDilationOffset: 30,
   uploadTransport: "multipart",
+  sourceTransferMode: "auto",
   autoTranslateEnabled: false,
   cacheEnabled: true,
   maxConcurrency: 2,
@@ -147,6 +148,15 @@ export const TRANSPORT_OPTIONS: Array<{
 }> = [
   { value: "multipart", label: "表单上传（Multipart）" },
   { value: "base64-json", label: "Base64（JSON）" }
+];
+
+export const SOURCE_TRANSFER_MODE_OPTIONS: Array<{
+  value: SourceTransferMode;
+  label: string;
+}> = [
+  { value: "auto", label: "自动" },
+  { value: "blob-upload", label: "浏览器上传 Blob" },
+  { value: "remote-url", label: "服务端直拉 URL" }
 ];
 
 export const MIN_RENDER_WIDTH = 220;

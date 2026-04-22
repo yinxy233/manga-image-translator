@@ -12,6 +12,7 @@ import {
   MIN_MASK_DILATION_OFFSET,
   MIN_UNCLIP_RATIO,
   RENDER_DIRECTION_OPTIONS,
+  SOURCE_TRANSFER_MODE_OPTIONS,
   TRANSLATOR_OPTIONS,
   TRANSPORT_OPTIONS
 } from "../config";
@@ -1123,6 +1124,8 @@ export class OverlayManager {
 
   private readonly transportSelect: HTMLSelectElement;
 
+  private readonly sourceTransferModeSelect: HTMLSelectElement;
+
   private readonly autoCheckbox: HTMLInputElement;
 
   private readonly cacheCheckbox: HTMLInputElement;
@@ -1223,6 +1226,7 @@ export class OverlayManager {
     this.inpaintingSizeInput = document.createElement("select");
     this.maskDilationOffsetInput = document.createElement("input");
     this.transportSelect = document.createElement("select");
+    this.sourceTransferModeSelect = document.createElement("select");
     this.autoCheckbox = document.createElement("input");
     this.cacheCheckbox = document.createElement("input");
     this.concurrencyInput = document.createElement("input");
@@ -1279,6 +1283,7 @@ export class OverlayManager {
     }
     this.maskDilationOffsetInput.value = String(settings.maskDilationOffset);
     this.transportSelect.value = settings.uploadTransport;
+    this.sourceTransferModeSelect.value = settings.sourceTransferMode;
     this.autoCheckbox.checked = settings.autoTranslateEnabled;
     this.cacheCheckbox.checked = settings.cacheEnabled;
     this.concurrencyInput.value = String(settings.maxConcurrency);
@@ -1617,6 +1622,14 @@ export class OverlayManager {
       this.transportSelect.appendChild(element);
     }
 
+    this.sourceTransferModeSelect.className = "mit-select";
+    for (const option of SOURCE_TRANSFER_MODE_OPTIONS) {
+      const element = document.createElement("option");
+      element.value = option.value;
+      element.textContent = option.label;
+      this.sourceTransferModeSelect.appendChild(element);
+    }
+
     this.autoCheckbox.type = "checkbox";
     this.cacheCheckbox.type = "checkbox";
     this.boxThresholdInput.type = "number";
@@ -1670,6 +1683,7 @@ export class OverlayManager {
     advancedGrid.className = "mit-settings-grid";
     advancedGrid.append(
       this.createField("上传方式", this.transportSelect),
+      this.createField("源图传输", this.sourceTransferModeSelect),
       this.createSwitchField("自动启动", this.autoCheckbox, "加载页面后自动开始扫描", true),
       this.createSwitchField("启用缓存", this.cacheCheckbox, "重复图片优先读取本地结果", true),
       this.createField("并发上限", this.concurrencyInput)
@@ -1732,6 +1746,7 @@ export class OverlayManager {
       inpaintingSize: Number(this.inpaintingSizeInput.value),
       maskDilationOffset: Number(this.maskDilationOffsetInput.value),
       uploadTransport: this.transportSelect.value as UserscriptSettings["uploadTransport"],
+      sourceTransferMode: this.sourceTransferModeSelect.value as UserscriptSettings["sourceTransferMode"],
       autoTranslateEnabled: this.autoCheckbox.checked,
       cacheEnabled: this.cacheCheckbox.checked,
       maxConcurrency: Number(this.concurrencyInput.value),

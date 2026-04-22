@@ -197,6 +197,7 @@ describe("OverlayManager", () => {
         "修复尺寸",
         "遮罩膨胀",
         "上传方式",
+        "源图传输",
         "自动启动",
         "启用缓存",
         "并发上限"
@@ -251,6 +252,7 @@ describe("OverlayManager", () => {
         serverBaseUrl: "https://translator.internal",
         cacheEnabled: false,
         maxConcurrency: 4,
+        sourceTransferMode: "auto",
         adapterOverrides: {
           mamekichimameko: false,
           generic: true

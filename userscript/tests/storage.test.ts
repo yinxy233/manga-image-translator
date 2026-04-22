@@ -7,6 +7,7 @@ describe("sanitizeSettings", () => {
   it("keeps a valid upload transport mode", () => {
     const settings = sanitizeSettings({
       uploadTransport: "base64-json",
+      sourceTransferMode: "remote-url",
       maxConcurrency: 3,
       cacheEnabled: false,
       adapterOverrides: {
@@ -16,6 +17,7 @@ describe("sanitizeSettings", () => {
     });
 
     expect(settings.uploadTransport).toBe("base64-json");
+    expect(settings.sourceTransferMode).toBe("remote-url");
     expect(settings.maxConcurrency).toBe(3);
     expect(settings.cacheEnabled).toBe(false);
     expect(settings.adapterOverrides).toEqual({
@@ -30,6 +32,7 @@ describe("sanitizeSettings", () => {
     });
 
     expect(settings.uploadTransport).toBe(DEFAULT_SETTINGS.uploadTransport);
+    expect(settings.sourceTransferMode).toBe(DEFAULT_SETTINGS.sourceTransferMode);
   });
 
   it("keeps valid pipeline and translator settings", () => {

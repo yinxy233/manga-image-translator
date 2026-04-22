@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import sys
 from io import BytesIO
 from types import ModuleType, SimpleNamespace
 
+from fastapi import HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 from PIL import Image
 from pydantic import BaseModel, ConfigDict
+import pytest
 
 
 def install_test_stubs() -> None:
@@ -76,6 +81,7 @@ def install_test_stubs() -> None:
 install_test_stubs()
 
 import server.main as server_main
+import server.request_extraction as request_extraction
 from server.settings import ServerSettings
 
 
@@ -119,6 +125,10 @@ def test_public_routes_remain_accessible_without_api_key(monkeypatch) -> None:
         )
 
     assert health_response.status_code == 200
+    assert health_response.json()["capabilities"] == {
+        "web_result_fastpath": True,
+        "source_url_translation": True,
+    }
     assert queue_response.status_code == 200
     assert translate_response.status_code == 200
     assert translate_response.headers["content-type"] == "image/png"
@@ -165,7 +175,124 @@ def test_public_routes_accept_correct_api_key(monkeypatch) -> None:
 
     assert health_response.status_code == 200
     assert health_response.json()["status"] == "ok"
+    assert health_response.json()["total_instances"] == 0
     assert translate_response.status_code == 200
+
+
+def test_json_web_stream_endpoint_enables_fast_path(monkeypatch) -> None:
+    """The JSON web streaming endpoint should enable placeholder optimization."""
+    captured: dict[str, object] = {}
+
+    async def fake_while_streaming(
+        _req: object,
+        _transform: object,
+        config: BaseModel,
+        image: str | bytes,
+    ) -> StreamingResponse:
+        captured["image"] = image
+        captured["web_fast_path"] = getattr(config, "_web_frontend_optimized", False)
+        return StreamingResponse(iter([b"ok"]), media_type="application/octet-stream")
+
+    png_data_url = "data:image/png;base64," + base64.b64encode(create_test_png_bytes()).decode("ascii")
+    monkeypatch.setattr(server_main, "while_streaming", fake_while_streaming)
+
+    with TestClient(server_main.app) as client:
+        response = client.post(
+            "/translate/image/stream/web",
+            json={"image": png_data_url, "config": {}},
+        )
+
+    assert response.status_code == 200
+    assert captured["image"] == png_data_url
+    assert captured["web_fast_path"] is True
+
+
+class FakeAioHttpResponse:
+    """Minimal async response context manager for remote image tests."""
+
+    def __init__(self, status: int, payload: bytes, content_type: str = "image/png") -> None:
+        self.status = status
+        self._payload = payload
+        self.headers = {"Content-Type": content_type}
+
+    async def __aenter__(self) -> "FakeAioHttpResponse":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    async def read(self) -> bytes:
+        return self._payload
+
+
+class FakeAioHttpSession:
+    """Minimal async session context manager for remote image tests."""
+
+    def __init__(self, response: FakeAioHttpResponse | None = None, error: Exception | None = None) -> None:
+        self._response = response
+        self._error = error
+
+    async def __aenter__(self) -> "FakeAioHttpSession":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def get(self, _url: str) -> FakeAioHttpResponse:
+        if self._error is not None:
+            raise self._error
+        if self._response is None:
+            raise RuntimeError("Response was not configured for FakeAioHttpSession.")
+        return self._response
+
+
+def test_remote_image_fetch_rejects_non_image_content(monkeypatch) -> None:
+    """Remote URL fetch should reject non-image content types."""
+    monkeypatch.setattr(
+        request_extraction.aiohttp,
+        "ClientSession",
+        lambda timeout=None: FakeAioHttpSession(
+            response=FakeAioHttpResponse(200, b"<html>not image</html>", content_type="text/html")
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(request_extraction.to_pil_image("https://example.com/page"))
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == "Remote URL did not return an image response."
+
+
+def test_remote_image_fetch_rejects_invalid_image_payload(monkeypatch) -> None:
+    """Remote URL fetch should reject undecodable image bytes."""
+    monkeypatch.setattr(
+        request_extraction.aiohttp,
+        "ClientSession",
+        lambda timeout=None: FakeAioHttpSession(
+            response=FakeAioHttpResponse(200, b"not-a-real-png", content_type="image/png")
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(request_extraction.to_pil_image("https://example.com/broken.png"))
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == "Image payload could not be decoded."
+
+
+def test_remote_image_fetch_rejects_timeout(monkeypatch) -> None:
+    """Remote URL fetch should surface timeouts as stable 422 errors."""
+    monkeypatch.setattr(
+        request_extraction.aiohttp,
+        "ClientSession",
+        lambda timeout=None: FakeAioHttpSession(error=asyncio.TimeoutError()),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(request_extraction.to_pil_image("https://example.com/slow.png"))
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == "Remote image request timed out."
 
 
 def test_internal_nonce_route_is_not_blocked_by_public_api_key(monkeypatch) -> None:

@@ -5,6 +5,7 @@ import { TranslationResultCache } from "../cache";
 import { loadSettings, saveSettings } from "../storage";
 import type {
   ConnectionState,
+  HealthPayload,
   LauncherPosition,
   OverlayViewModel,
   QueueStats,
@@ -29,6 +30,9 @@ interface SharedImageTask {
   queuePosition: string | null;
   activeTask: boolean;
   servedFromCache: boolean;
+  resultFolder: string | null;
+  finalResultFetched: boolean;
+  finalFetchInFlight: Promise<void> | null;
 }
 
 interface ImageEntry {
@@ -55,10 +59,6 @@ function createQueueStats(): QueueStats {
     errors: 0,
     ignored: 0
   };
-}
-
-function isRenderableEvent(event: TranslationEvent): boolean {
-  return !event.text.startsWith("rendering_folder:") && !event.text.startsWith("final_ready:");
 }
 
 function deriveProgressMessage(event: TranslationEvent): string {
@@ -126,7 +126,7 @@ export class TranslatorController {
     this.refreshAdapterState();
 
     this.queue = new TaskQueue({
-      maxConcurrency: this.settings.maxConcurrency,
+      maxConcurrency: this.getEffectiveMaxConcurrency(),
       paused: !this.enabled,
       onStatsChange: (stats) => {
         this.queueStats = stats;
@@ -156,6 +156,7 @@ export class TranslatorController {
     }
 
     this.renderChrome();
+    void this.refreshServerHealth(true);
   }
 
   private renderChrome(): void {
@@ -281,7 +282,10 @@ export class TranslatorController {
         message: "等待加入队列",
         queuePosition: null,
         activeTask: false,
-        servedFromCache: false
+        servedFromCache: false,
+        resultFolder: null,
+        finalResultFetched: false,
+        finalFetchInFlight: null
       };
       this.sharedTasks.set(signature, shared);
       this.enqueueSharedTask(shared);
@@ -309,6 +313,9 @@ export class TranslatorController {
     shared.message = "等待抓取原图";
     shared.queuePosition = null;
     shared.servedFromCache = false;
+    shared.resultFolder = null;
+    shared.finalResultFetched = false;
+    shared.finalFetchInFlight = null;
 
     const generation = this.generation;
     this.queue.enqueue({
@@ -330,17 +337,20 @@ export class TranslatorController {
         this.renderImages();
       },
       run: async (signal) => {
-        const sourceBlob = await this.transport.fetchImageBlob(shared.sourceUrl, signal);
+        const preferRemoteUrl = await this.transport.shouldUseRemoteUrl(this.settings, shared.sourceUrl);
+        this.applyHealth(this.transport.getCachedHealth(this.settings));
         if (generation !== this.generation) {
           return;
         }
 
+        let sourceBlob: Blob | null = null;
         let cacheKey: string | null = null;
-        if (this.settings.cacheEnabled) {
+        if (this.settings.cacheEnabled && !preferRemoteUrl) {
           shared.status = "processing";
           shared.message = "检查本地缓存";
           this.renderImages();
 
+          sourceBlob = await this.transport.fetchImageBlob(shared.sourceUrl, signal);
           cacheKey = await this.resultCache.buildKey(sourceBlob, this.settings);
           if (cacheKey) {
             const cachedResult = await this.resultCache.get(cacheKey);
@@ -361,13 +371,24 @@ export class TranslatorController {
           }
         }
 
+        if (!preferRemoteUrl && !sourceBlob) {
+          shared.status = "processing";
+          shared.message = "抓取原图";
+          this.renderImages();
+          sourceBlob = await this.transport.fetchImageBlob(shared.sourceUrl, signal);
+          if (generation !== this.generation) {
+            return;
+          }
+        }
+
         shared.status = "processing";
-        shared.message = "上传到翻译服务";
+        shared.message = preferRemoteUrl ? "提交源图地址" : "上传到翻译服务";
         this.renderImages();
 
         const result = await this.transport.translateImage({
-          imageBlob: sourceBlob,
+          imageBlob: sourceBlob ?? undefined,
           fileName: deriveFileName(shared.sourceUrl),
+          sourceUrl: shared.sourceUrl,
           settings: this.settings,
           signal,
           onEvent: (event) => this.handleTranslationEvent(shared, generation, event)
@@ -381,10 +402,12 @@ export class TranslatorController {
           await this.resultCache.set(cacheKey, result);
         }
 
-        if (shared.resultUrl) {
-          URL.revokeObjectURL(shared.resultUrl);
+        if (!shared.finalResultFetched) {
+          if (shared.resultUrl) {
+            URL.revokeObjectURL(shared.resultUrl);
+          }
+          shared.resultUrl = URL.createObjectURL(result);
         }
-        shared.resultUrl = URL.createObjectURL(result);
       },
       onSuccess: () => {
         if (generation !== this.generation) {
@@ -392,7 +415,11 @@ export class TranslatorController {
         }
         shared.activeTask = false;
         shared.status = "complete";
-        shared.message = shared.servedFromCache ? "已从缓存加载" : "翻译完成";
+        shared.message = shared.servedFromCache
+          ? "已从缓存加载"
+          : shared.finalResultFetched
+            ? "已提前加载最终图"
+            : "翻译完成";
         shared.queuePosition = null;
         this.connection = createConnectionState(
           shared.servedFromCache ? "已命中本地缓存" : "翻译服务已响应",
@@ -432,7 +459,7 @@ export class TranslatorController {
     generation: number,
     event: TranslationEvent
   ): void {
-    if (generation !== this.generation || !isRenderableEvent(event)) {
+    if (generation !== this.generation) {
       return;
     }
 
@@ -453,6 +480,20 @@ export class TranslatorController {
     }
 
     if (event.code === 1) {
+      if (event.text.startsWith("rendering_folder:")) {
+        shared.resultFolder = event.text.slice("rendering_folder:".length) || null;
+        return;
+      }
+
+      if (event.text.startsWith("final_ready:")) {
+        const folderName = event.text.slice("final_ready:".length) || shared.resultFolder;
+        if (folderName) {
+          shared.resultFolder = folderName;
+          void this.fetchFinalResult(shared, generation, folderName);
+        }
+        return;
+      }
+
       shared.status = "processing";
       shared.message = deriveProgressMessage(event);
       this.renderImages();
@@ -466,7 +507,7 @@ export class TranslatorController {
     this.overlay.updateAdapterStates(this.adapterStates);
     this.resetRuntimeState();
     this.rebuildDiscovery();
-    this.queue.setMaxConcurrency(this.settings.maxConcurrency);
+    this.queue.setMaxConcurrency(this.getEffectiveMaxConcurrency());
     this.enabled = this.settings.autoTranslateEnabled;
     if (this.enabled) {
       this.queue.resume();
@@ -476,6 +517,7 @@ export class TranslatorController {
     }
     this.overlay.toast("设置已保存。后续任务将使用新配置。", "neutral");
     this.renderChrome();
+    void this.refreshServerHealth(true);
   }
 
   private resetRuntimeState(): void {
@@ -593,7 +635,10 @@ export class TranslatorController {
 
   private async testConnection(): Promise<void> {
     try {
-      const health = await this.transport.checkHealth(this.settings);
+      const health = await this.refreshServerHealth(false);
+      if (!health) {
+        throw new Error("Failed to reach the translation server.");
+      }
       this.connection = createConnectionState(
         `连接成功 · v${health.version} · 队列 ${health.queue_size}`,
         "success"
@@ -625,5 +670,77 @@ export class TranslatorController {
     }
 
     return "未知错误";
+  }
+
+  private getEffectiveMaxConcurrency(health: HealthPayload | null = this.transport.getCachedHealth(this.settings)): number {
+    const totalInstances = health?.total_instances;
+    if (!Number.isFinite(totalInstances) || totalInstances === undefined || totalInstances <= 0) {
+      return this.settings.maxConcurrency;
+    }
+    return Math.max(1, Math.min(this.settings.maxConcurrency, Math.trunc(totalInstances)));
+  }
+
+  private applyHealth(health: HealthPayload | null): void {
+    if (!health) {
+      return;
+    }
+    this.queue.setMaxConcurrency(this.getEffectiveMaxConcurrency(health));
+  }
+
+  private async refreshServerHealth(silent: boolean): Promise<HealthPayload | null> {
+    try {
+      const health = await this.transport.checkHealth(this.settings);
+      this.applyHealth(health);
+      return health;
+    } catch (error) {
+      if (!silent) {
+        throw error;
+      }
+      return null;
+    }
+  }
+
+  private async fetchFinalResult(
+    shared: SharedImageTask,
+    generation: number,
+    folderName: string
+  ): Promise<void> {
+    if (generation !== this.generation || shared.finalResultFetched || shared.finalFetchInFlight) {
+      return;
+    }
+
+    shared.status = "processing";
+    shared.message = "最终结果已就绪，正在拉取";
+    this.renderImages();
+
+    shared.finalFetchInFlight = this.transport
+      .fetchFinalImage(this.settings, folderName)
+      .then((finalBlob) => {
+        if (generation !== this.generation) {
+          return;
+        }
+
+        if (shared.resultUrl) {
+          URL.revokeObjectURL(shared.resultUrl);
+        }
+        shared.resultUrl = URL.createObjectURL(finalBlob);
+        shared.finalResultFetched = true;
+        shared.message = shared.activeTask ? "最终结果已就绪" : "翻译完成";
+        this.renderImages();
+      })
+      .catch(() => {
+        if (generation !== this.generation) {
+          return;
+        }
+        this.renderImages();
+      })
+      .finally(() => {
+        if (generation !== this.generation) {
+          return;
+        }
+        shared.finalFetchInFlight = null;
+      });
+
+    await shared.finalFetchInFlight;
   }
 }
