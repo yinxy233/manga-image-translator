@@ -978,10 +978,11 @@ const STYLE_TEXT = `
 
   @media (max-width: 720px) {
     .mit-dock {
-      left: 12px;
-      right: 12px;
+      left: auto;
+      right: max(12px, env(safe-area-inset-right));
       bottom: max(12px, env(safe-area-inset-bottom));
-      width: auto;
+      width: min(312px, calc(100vw - 24px - env(safe-area-inset-left) - env(safe-area-inset-right)));
+      max-width: calc(100vw - 24px - env(safe-area-inset-left) - env(safe-area-inset-right));
     }
 
     .mit-status-card {

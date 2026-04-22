@@ -37,6 +37,24 @@ describe("site adapter registry", () => {
     expect(activeAdapters.map((adapter) => adapter.id)).toEqual(["mamekichimameko"]);
   });
 
+  it("installs ad-hiding DOM tweaks for mamekichimameko article pages", () => {
+    const [activeAdapter] = resolveActiveSiteAdapters(
+      new URL("https://mamekichimameko.blog.jp/archives/91234726.html?sp=1"),
+      buildDefaultAdapterOverrides()
+    );
+
+    const cleanup = activeAdapter?.installDomTweaks?.(document);
+    const style = document.head.querySelector('style[data-mit-site-adapter="mamekichimameko"]');
+
+    expect(activeAdapter?.id).toBe("mamekichimameko");
+    expect(style?.textContent).toContain("#article_top");
+    expect(style?.textContent).toContain("#geniee_overlay_outer");
+    expect(style?.textContent).toContain('iframe[src*="doubleclick.net"]');
+
+    cleanup?.();
+    expect(document.head.querySelector('style[data-mit-site-adapter="mamekichimameko"]')).toBeNull();
+  });
+
   it("falls back to the generic adapter outside supported article pages", () => {
     const states = resolveSiteAdapterStates(
       new URL("https://mamekichimameko.blog.jp/"),

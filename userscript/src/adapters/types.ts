@@ -13,6 +13,7 @@ export interface SiteAdapterDefinition {
   getRootSelectors(): string[];
   isImageCandidate(image: HTMLImageElement): boolean;
   resolveImageSource(image: HTMLImageElement): string | null;
+  installDomTweaks?(document: Document): void | (() => void);
 }
 
 export interface SiteAdapterState {

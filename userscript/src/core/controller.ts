@@ -1,5 +1,5 @@
 import { resolveActiveSiteAdapters, resolveSiteAdapterStates } from "../adapters";
-import type { SiteAdapterState } from "../adapters/types";
+import type { SiteAdapterDefinition, SiteAdapterState } from "../adapters/types";
 import { PROGRESS_TEXT_MAP } from "../config";
 import { TranslationResultCache } from "../cache";
 import { loadSettings, saveSettings } from "../storage";
@@ -117,6 +117,8 @@ export class TranslatorController {
   private readonly sharedTasks = new Map<string, SharedImageTask>();
 
   private adapterStates: SiteAdapterState[] = [];
+
+  private adapterDomTweaksCleanup: (() => void) | null = null;
 
   constructor() {
     this.transport = new TransportClient();
@@ -497,11 +499,32 @@ export class TranslatorController {
 
   private rebuildDiscovery(): void {
     this.discovery?.stop();
+    this.adapterDomTweaksCleanup?.();
+    this.adapterDomTweaksCleanup = null;
+
+    const activeAdapters = resolveActiveSiteAdapters(window.location, this.settings.adapterOverrides);
+    this.adapterDomTweaksCleanup = this.installAdapterDomTweaks(activeAdapters);
     this.discovery = new ImageDiscovery({
-      adapters: resolveActiveSiteAdapters(window.location, this.settings.adapterOverrides),
+      adapters: activeAdapters,
       onImageEligible: (candidate) => this.handleDiscoveredImage(candidate)
     });
     this.discovery.start();
+  }
+
+  private installAdapterDomTweaks(adapters: ReadonlyArray<SiteAdapterDefinition>): (() => void) | null {
+    const cleanups = adapters
+      .map((adapter) => adapter.installDomTweaks?.(document))
+      .filter((cleanup): cleanup is () => void => typeof cleanup === "function");
+
+    if (cleanups.length === 0) {
+      return null;
+    }
+
+    return () => {
+      for (const cleanup of cleanups.reverse()) {
+        cleanup();
+      }
+    };
   }
 
   private toggleImageOriginal(id: string): void {

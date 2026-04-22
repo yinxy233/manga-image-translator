@@ -261,6 +261,18 @@ describe("OverlayManager", () => {
     overlay.destroy();
   });
 
+  it("keeps the mobile dock narrower instead of stretching edge to edge", () => {
+    const overlay = createOverlay();
+    const styleText = overlay.shadowRoot.querySelector("style")?.textContent ?? "";
+
+    expect(styleText).toContain("@media (max-width: 720px)");
+    expect(styleText).toContain(
+      "width: min(312px, calc(100vw - 24px - env(safe-area-inset-left) - env(safe-area-inset-right)));"
+    );
+
+    overlay.destroy();
+  });
+
   it("allows dragging the floating launcher and persists the new position", () => {
     const onLauncherPositionChange = vi.fn();
     const overlay = createOverlay({ onLauncherPositionChange });
