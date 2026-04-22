@@ -1,14 +1,18 @@
 {
   "name": "manga-image-translator-userscript",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.1.0",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "check": "pnpm typecheck && pnpm test",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "release:patch": "pnpm version patch --no-git-tag-version && pnpm build",
+    "release:minor": "pnpm version minor --no-git-tag-version && pnpm build",
+    "release:major": "pnpm version major --no-git-tag-version && pnpm build"
   },
   "devDependencies": {
     "@types/node": "^20",

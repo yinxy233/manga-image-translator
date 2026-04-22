@@ -25,6 +25,11 @@ export type TranslatorKey =
 
 export type UploadTransport = "multipart" | "base64-json";
 
+export interface LauncherPosition {
+  x: number;
+  y: number;
+}
+
 export interface UserscriptSettings {
   serverBaseUrl: string;
   apiKey: string;
@@ -33,6 +38,7 @@ export interface UserscriptSettings {
   uploadTransport: UploadTransport;
   autoTranslateEnabled: boolean;
   maxConcurrency: number;
+  launcherPosition: LauncherPosition | null;
 }
 
 export interface HealthPayload {

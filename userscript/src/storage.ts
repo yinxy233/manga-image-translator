@@ -1,5 +1,5 @@
 import { DEFAULT_SETTINGS } from "./config";
-import type { UserscriptSettings } from "./types";
+import type { LauncherPosition, UserscriptSettings } from "./types";
 
 const SETTINGS_KEY = "mit-userscript-settings";
 
@@ -26,6 +26,7 @@ export function sanitizeSettings(settings: Partial<UserscriptSettings>): Userscr
     settings.uploadTransport === "base64-json" || settings.uploadTransport === "multipart"
       ? settings.uploadTransport
       : DEFAULT_SETTINGS.uploadTransport;
+  const launcherPosition = sanitizeLauncherPosition(settings.launcherPosition);
 
   return {
     serverBaseUrl: String(settings.serverBaseUrl ?? DEFAULT_SETTINGS.serverBaseUrl).trim() || DEFAULT_SETTINGS.serverBaseUrl,
@@ -34,7 +35,8 @@ export function sanitizeSettings(settings: Partial<UserscriptSettings>): Userscr
     translator: (settings.translator ?? DEFAULT_SETTINGS.translator) as UserscriptSettings["translator"],
     uploadTransport,
     autoTranslateEnabled: Boolean(settings.autoTranslateEnabled ?? DEFAULT_SETTINGS.autoTranslateEnabled),
-    maxConcurrency
+    maxConcurrency,
+    launcherPosition
   };
 }
 
@@ -55,4 +57,21 @@ export function saveSettings(settings: UserscriptSettings): UserscriptSettings {
   const normalized = sanitizeSettings(settings);
   writeRawValue(JSON.stringify(normalized));
   return normalized;
+}
+
+function sanitizeLauncherPosition(
+  position: UserscriptSettings["launcherPosition"] | undefined
+): LauncherPosition | null {
+  if (!position) {
+    return DEFAULT_SETTINGS.launcherPosition;
+  }
+
+  if (!Number.isFinite(position.x) || !Number.isFinite(position.y)) {
+    return DEFAULT_SETTINGS.launcherPosition;
+  }
+
+  return {
+    x: Math.round(Number(position.x)),
+    y: Math.round(Number(position.y))
+  };
 }

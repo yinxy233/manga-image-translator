@@ -17,12 +17,28 @@ This directory contains a standalone Tampermonkey userscript project for connect
 ```bash
 cd userscript
 pnpm install
-pnpm typecheck
-pnpm test
+pnpm check
 pnpm build
 ```
 
 构建完成后，产物会出现在 `userscript/dist/`，将其中的 `.user.js` 文件导入 Tampermonkey 即可。
+
+## Versioning
+
+推荐使用语义化版本（SemVer）发版，而不是每次 `build` 自动递增版本号。
+
+```bash
+cd userscript
+pnpm release:patch
+pnpm release:minor
+pnpm release:major
+```
+
+- `patch`: 修复问题，不改兼容性，例如 `0.1.0 -> 0.1.1`
+- `minor`: 向后兼容的新功能，例如 `0.1.0 -> 0.2.0`
+- `major`: 不兼容变更，例如 `0.1.0 -> 1.0.0`
+
+这些命令会先更新 [package.json](./package.json) 里的 `version`，再执行打包，因此 userscript 头部的 `@version` 会同步更新。
 
 ## Server Setup
 

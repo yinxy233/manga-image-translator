@@ -21,4 +21,29 @@ describe("sanitizeSettings", () => {
 
     expect(settings.uploadTransport).toBe(DEFAULT_SETTINGS.uploadTransport);
   });
+
+  it("keeps a valid launcher position", () => {
+    const settings = sanitizeSettings({
+      launcherPosition: {
+        x: 120.4,
+        y: 248.8
+      }
+    });
+
+    expect(settings.launcherPosition).toEqual({
+      x: 120,
+      y: 249
+    });
+  });
+
+  it("falls back to the default launcher position for invalid values", () => {
+    const settings = sanitizeSettings({
+      launcherPosition: {
+        x: Number.NaN,
+        y: 180
+      }
+    });
+
+    expect(settings.launcherPosition).toBe(DEFAULT_SETTINGS.launcherPosition);
+  });
 });

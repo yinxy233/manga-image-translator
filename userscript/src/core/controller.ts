@@ -2,6 +2,7 @@ import { PROGRESS_TEXT_MAP } from "../config";
 import { loadSettings, saveSettings } from "../storage";
 import type {
   ConnectionState,
+  LauncherPosition,
   OverlayViewModel,
   QueueStats,
   SharedTaskStatus,
@@ -120,6 +121,8 @@ export class TranslatorController {
     });
 
     this.overlay = new OverlayManager(this.settings, {
+      onTranslateNow: () => this.translateCurrentPage(),
+      onLauncherPositionChange: (position) => this.persistLauncherPosition(position),
       onToggleSession: () => this.toggleSession(),
       onToggleGlobalOriginal: () => this.toggleGlobalOriginal(),
       onTestConnection: () => {
@@ -205,10 +208,31 @@ export class TranslatorController {
     this.renderChrome();
   }
 
+  private translateCurrentPage(): void {
+    const wasEnabled = this.enabled;
+    if (!wasEnabled) {
+      this.enabled = true;
+      this.queue.resume();
+    }
+
+    this.discovery.reset();
+    this.discovery.rescan();
+    this.renderChrome();
+    this.overlay.toast(wasEnabled ? "已重新扫描当前页图片。" : "已启动本页自动翻译。", "neutral");
+  }
+
   private toggleGlobalOriginal(): void {
     this.globalShowOriginal = !this.globalShowOriginal;
     this.renderChrome();
     this.renderImages();
+  }
+
+  private persistLauncherPosition(position: LauncherPosition): void {
+    this.settings = saveSettings({
+      ...this.settings,
+      launcherPosition: position
+    });
+    this.overlay.updateSettings(this.settings);
   }
 
   private handleDiscoveredImage(image: HTMLImageElement): void {

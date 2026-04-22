@@ -7,7 +7,8 @@ export const DEFAULT_SETTINGS: UserscriptSettings = {
   translator: "youdao",
   uploadTransport: "multipart",
   autoTranslateEnabled: false,
-  maxConcurrency: 2
+  maxConcurrency: 2,
+  launcherPosition: null
 };
 
 export const TRANSLATOR_OPTIONS: Array<{ value: TranslatorKey; label: string }> = [
