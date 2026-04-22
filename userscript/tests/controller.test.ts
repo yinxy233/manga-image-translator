@@ -6,7 +6,9 @@ const mockCheckHealth = vi.fn();
 const mockGetCachedHealth = vi.fn();
 const mockShouldUseRemoteUrl = vi.fn();
 const mockFetchFinalImage = vi.fn();
+const mockQueueEnqueue = vi.fn();
 const mockQueueSetMaxConcurrency = vi.fn();
+const mockQueueSetPriority = vi.fn();
 const mockRenderImages = vi.fn();
 
 vi.mock("../src/storage", () => ({
@@ -49,12 +51,13 @@ vi.mock("../src/core/overlayManager", () => ({
 
 vi.mock("../src/core/taskQueue", () => ({
   TaskQueue: class TaskQueue {
-    enqueue = vi.fn();
+    enqueue = mockQueueEnqueue;
     pause = vi.fn();
     resume = vi.fn();
     reset = vi.fn();
     cancel = vi.fn();
     setMaxConcurrency = mockQueueSetMaxConcurrency;
+    setPriority = mockQueueSetPriority;
   }
 }));
 
@@ -86,7 +89,9 @@ describe("TranslatorController", () => {
     mockGetCachedHealth.mockReset();
     mockShouldUseRemoteUrl.mockReset();
     mockFetchFinalImage.mockReset();
+    mockQueueEnqueue.mockReset();
     mockQueueSetMaxConcurrency.mockReset();
+    mockQueueSetPriority.mockReset();
     mockRenderImages.mockReset();
     mockGetCachedHealth.mockReturnValue(null);
     mockShouldUseRemoteUrl.mockResolvedValue(false);
@@ -179,5 +184,74 @@ describe("TranslatorController", () => {
     );
 
     expect(mockQueueSetMaxConcurrency).toHaveBeenCalledWith(1);
+  });
+
+  it("only enqueues ahead-of-viewport work after the idle prefetch pass", async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(window, "innerHeight", {
+      configurable: true,
+      writable: true,
+      value: 1000
+    });
+
+    const { TranslatorController } = await import("../src/core/controller");
+    const controller = new TranslatorController();
+    (controller as unknown as { enabled: boolean }).enabled = true;
+
+    const image = document.createElement("img");
+    document.body.appendChild(image);
+    image.getBoundingClientRect = () =>
+      ({
+        top: 1400,
+        bottom: 2200,
+        left: 0,
+        right: 800,
+        width: 800,
+        height: 800
+      }) as DOMRect;
+
+    const shared = {
+      signature: "sig-prefetch",
+      sourceUrl: "https://cdn.example.com/page-2.png",
+      taskId: "task-prefetch",
+      imageIds: new Set<string>(["image-1"]),
+      resultUrl: null,
+      status: "queued" as const,
+      message: "等待进入预翻窗口",
+      queuePosition: null,
+      activeTask: false,
+      servedFromCache: false,
+      resultFolder: null,
+      finalResultFetched: false,
+      finalFetchInFlight: null
+    };
+
+    (controller as unknown as { imageEntries: Map<string, unknown> }).imageEntries.set("image-1", {
+      id: "image-1",
+      image,
+      shared,
+      showOriginal: false,
+      ignored: false,
+      canceled: false
+    });
+    (controller as unknown as { sharedTasks: Map<string, unknown> }).sharedTasks.set(shared.signature, shared);
+
+    await (controller as unknown as { syncPrefetchWindow: (allowAheadPrefetch: boolean) => void }).syncPrefetchWindow(
+      false
+    );
+    expect(mockQueueEnqueue).not.toHaveBeenCalled();
+
+    await (controller as unknown as { scheduleScrollIdlePrefetch: () => void }).scheduleScrollIdlePrefetch();
+    vi.advanceTimersByTime(400);
+
+    expect(mockQueueEnqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "task-prefetch",
+        priority: expect.any(Number)
+      })
+    );
+
+    document.body.removeChild(image);
+    vi.useRealTimers();
   });
 });

@@ -1,6 +1,13 @@
 import { resolveActiveSiteAdapters, resolveSiteAdapterStates } from "../adapters";
 import type { SiteAdapterDefinition, SiteAdapterState } from "../adapters/types";
-import { PROGRESS_TEXT_MAP } from "../config";
+import {
+  PREFETCH_HOT_AHEAD_VIEWPORTS,
+  PREFETCH_HOT_BEHIND_VIEWPORTS,
+  PREFETCH_MAX_QUEUE_AHEAD,
+  PREFETCH_SCROLL_IDLE_MS,
+  PREFETCH_WARM_AHEAD_VIEWPORTS,
+  PROGRESS_TEXT_MAP
+} from "../config";
 import { TranslationResultCache } from "../cache";
 import { loadSettings, saveSettings } from "../storage";
 import type {
@@ -42,6 +49,16 @@ interface ImageEntry {
   showOriginal: boolean;
   ignored: boolean;
   canceled: boolean;
+}
+
+type ScrollDirection = "up" | "down";
+
+type PrefetchZone = "visible" | "ahead" | "behind" | "warm" | "cold";
+
+interface PrefetchCandidate {
+  shared: SharedImageTask;
+  priority: number;
+  zone: PrefetchZone;
 }
 
 function createConnectionState(
@@ -120,6 +137,28 @@ export class TranslatorController {
 
   private adapterDomTweaksCleanup: (() => void) | null = null;
 
+  private scrollDirection: ScrollDirection = "down";
+
+  private lastScrollY = window.scrollY;
+
+  private scrollIdleTimer: number | null = null;
+
+  private readonly handleWindowScroll = (): void => {
+    const nextScrollY = window.scrollY;
+    if (nextScrollY !== this.lastScrollY) {
+      this.scrollDirection = nextScrollY > this.lastScrollY ? "down" : "up";
+      this.lastScrollY = nextScrollY;
+    }
+
+    this.syncPrefetchWindow(false);
+    this.scheduleScrollIdlePrefetch();
+  };
+
+  private readonly handleViewportResize = (): void => {
+    this.syncPrefetchWindow(false);
+    this.scheduleScrollIdlePrefetch();
+  };
+
   constructor() {
     this.transport = new TransportClient();
     this.resultCache = new TranslationResultCache();
@@ -150,9 +189,13 @@ export class TranslatorController {
     });
 
     this.rebuildDiscovery();
+    window.addEventListener("scroll", this.handleWindowScroll, { passive: true });
+    window.addEventListener("resize", this.handleViewportResize, { passive: true });
 
     if (this.enabled) {
       this.discovery?.rescan();
+      this.syncPrefetchWindow(false);
+      this.scheduleScrollIdlePrefetch();
     }
 
     this.renderChrome();
@@ -212,9 +255,12 @@ export class TranslatorController {
       this.queue.resume();
       this.discovery?.reset();
       this.discovery?.rescan();
+      this.syncPrefetchWindow(false);
+      this.scheduleScrollIdlePrefetch();
       this.overlay.toast("已启动本页自动翻译。", "neutral");
     } else {
       this.queue.pause();
+      this.clearScrollIdlePrefetch();
       this.overlay.toast("已暂停新任务排队。正在处理的任务会继续完成。", "neutral");
     }
     this.renderChrome();
@@ -229,6 +275,8 @@ export class TranslatorController {
 
     this.discovery?.reset();
     this.discovery?.rescan();
+    this.syncPrefetchWindow(false);
+    this.scheduleScrollIdlePrefetch();
     this.renderChrome();
     this.overlay.toast(wasEnabled ? "已重新扫描当前页图片。" : "已启动本页自动翻译。", "neutral");
   }
@@ -301,9 +349,11 @@ export class TranslatorController {
       canceled: false
     });
     this.renderImages();
+    this.syncPrefetchWindow(false);
+    this.scheduleScrollIdlePrefetch();
   }
 
-  private enqueueSharedTask(shared: SharedImageTask): void {
+  private enqueueSharedTask(shared: SharedImageTask, priority = 0): void {
     if (shared.activeTask) {
       return;
     }
@@ -320,6 +370,7 @@ export class TranslatorController {
     const generation = this.generation;
     this.queue.enqueue({
       id: shared.taskId,
+      priority,
       onQueued: () => {
         if (generation !== this.generation) {
           return;
@@ -512,8 +563,11 @@ export class TranslatorController {
     if (this.enabled) {
       this.queue.resume();
       this.discovery?.rescan();
+      this.syncPrefetchWindow(false);
+      this.scheduleScrollIdlePrefetch();
     } else {
       this.queue.pause();
+      this.clearScrollIdlePrefetch();
     }
     this.overlay.toast("设置已保存。后续任务将使用新配置。", "neutral");
     this.renderChrome();
@@ -532,6 +586,7 @@ export class TranslatorController {
     this.sharedTasks.clear();
     this.imageIds = new WeakMap<HTMLImageElement, string>();
     this.discovery?.reset();
+    this.clearScrollIdlePrefetch();
     this.renderImages();
   }
 
@@ -587,6 +642,7 @@ export class TranslatorController {
     entry.canceled = false;
     this.cancelSharedTaskIfUnused(entry.shared, "ignored");
     this.renderImages();
+    this.syncPrefetchWindow(false);
   }
 
   private cancelImage(id: string): void {
@@ -598,6 +654,7 @@ export class TranslatorController {
     entry.ignored = false;
     this.cancelSharedTaskIfUnused(entry.shared, "canceled");
     this.renderImages();
+    this.syncPrefetchWindow(false);
   }
 
   private retryImage(id: string): void {
@@ -615,10 +672,12 @@ export class TranslatorController {
     }
 
     if (!entry.shared.activeTask) {
-      this.enqueueSharedTask(entry.shared);
+      this.enqueueSharedTask(entry.shared, 0);
     }
 
     this.renderImages();
+    this.syncPrefetchWindow(false);
+    this.scheduleScrollIdlePrefetch();
   }
 
   private cancelSharedTaskIfUnused(shared: SharedImageTask, reason: CancelReason): void {
@@ -631,6 +690,185 @@ export class TranslatorController {
     if (shared.activeTask) {
       this.queue.cancel(shared.taskId, reason);
     }
+  }
+
+  private clearScrollIdlePrefetch(): void {
+    if (this.scrollIdleTimer === null) {
+      return;
+    }
+    window.clearTimeout(this.scrollIdleTimer);
+    this.scrollIdleTimer = null;
+  }
+
+  private scheduleScrollIdlePrefetch(): void {
+    if (!this.enabled) {
+      return;
+    }
+
+    this.clearScrollIdlePrefetch();
+    this.scrollIdleTimer = window.setTimeout(() => {
+      this.scrollIdleTimer = null;
+      this.syncPrefetchWindow(true);
+    }, PREFETCH_SCROLL_IDLE_MS);
+  }
+
+  private syncPrefetchWindow(allowAheadPrefetch: boolean): void {
+    if (!this.enabled) {
+      return;
+    }
+
+    const candidates = this.collectPrefetchCandidates();
+    if (candidates.length === 0) {
+      return;
+    }
+
+    const targetTaskIds = new Set<string>();
+    const visibleCandidates = candidates.filter((candidate) => candidate.zone === "visible");
+
+    for (const candidate of visibleCandidates) {
+      targetTaskIds.add(candidate.shared.taskId);
+    }
+
+    if (allowAheadPrefetch) {
+      const queuedAheadCandidates = candidates.filter(
+        (candidate) => candidate.zone !== "visible" && candidate.zone !== "cold"
+      );
+      let remainingBudget = PREFETCH_MAX_QUEUE_AHEAD;
+
+      for (const candidate of queuedAheadCandidates) {
+        if (remainingBudget <= 0) {
+          break;
+        }
+        targetTaskIds.add(candidate.shared.taskId);
+        remainingBudget -= 1;
+      }
+    }
+
+    for (const candidate of candidates) {
+      const isTargetTask = targetTaskIds.has(candidate.shared.taskId);
+
+      if (!isTargetTask) {
+        if (candidate.shared.activeTask) {
+          this.queue.setPriority(candidate.shared.taskId, 0);
+        } else if (this.isAutoSchedulableShared(candidate.shared)) {
+          candidate.shared.status = "queued";
+          candidate.shared.message = "等待进入预翻窗口";
+          candidate.shared.queuePosition = null;
+        }
+        continue;
+      }
+
+      if (candidate.shared.activeTask) {
+        this.queue.setPriority(candidate.shared.taskId, candidate.priority);
+        continue;
+      }
+
+      if (!this.isAutoSchedulableShared(candidate.shared)) {
+        continue;
+      }
+
+      this.enqueueSharedTask(candidate.shared, candidate.priority);
+    }
+
+    this.renderImages();
+  }
+
+  private collectPrefetchCandidates(): PrefetchCandidate[] {
+    const candidates: PrefetchCandidate[] = [];
+
+    for (const shared of this.sharedTasks.values()) {
+      const candidate = this.evaluateSharedTaskPrefetch(shared);
+      if (candidate) {
+        candidates.push(candidate);
+      }
+    }
+
+    candidates.sort((left, right) => right.priority - left.priority);
+    return candidates;
+  }
+
+  private evaluateSharedTaskPrefetch(shared: SharedImageTask): PrefetchCandidate | null {
+    let bestCandidate: PrefetchCandidate | null = null;
+
+    for (const imageId of shared.imageIds) {
+      const entry = this.imageEntries.get(imageId);
+      if (!entry || entry.ignored || entry.canceled || !entry.image.isConnected) {
+        continue;
+      }
+
+      const rect = entry.image.getBoundingClientRect();
+      const candidate = this.buildPrefetchCandidate(shared, rect);
+      if (!candidate) {
+        continue;
+      }
+
+      if (!bestCandidate || candidate.priority > bestCandidate.priority) {
+        bestCandidate = candidate;
+      }
+    }
+
+    return bestCandidate;
+  }
+
+  private buildPrefetchCandidate(shared: SharedImageTask, rect: DOMRect): PrefetchCandidate | null {
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+
+    const viewportHeight = Math.max(window.innerHeight, 1);
+    const viewportCenter = viewportHeight / 2;
+    const hotAheadPx = viewportHeight * PREFETCH_HOT_AHEAD_VIEWPORTS;
+    const hotBehindPx = viewportHeight * PREFETCH_HOT_BEHIND_VIEWPORTS;
+    const warmAheadPx = viewportHeight * PREFETCH_WARM_AHEAD_VIEWPORTS;
+    const rectCenter = rect.top + rect.height / 2;
+    const belowDistance = rect.top - viewportHeight;
+    const aboveDistance = 0 - rect.bottom;
+
+    if (rect.bottom >= 0 && rect.top <= viewportHeight) {
+      return {
+        shared,
+        zone: "visible",
+        priority: 400000 - Math.abs(rectCenter - viewportCenter)
+      };
+    }
+
+    if (belowDistance >= 0 && belowDistance <= hotAheadPx) {
+      return {
+        shared,
+        zone: "ahead",
+        priority:
+          (this.scrollDirection === "down" ? 320000 : 260000) -
+          belowDistance
+      };
+    }
+
+    if (aboveDistance >= 0 && aboveDistance <= hotBehindPx) {
+      return {
+        shared,
+        zone: "behind",
+        priority:
+          (this.scrollDirection === "up" ? 300000 : 210000) -
+          aboveDistance
+      };
+    }
+
+    if (belowDistance >= 0 && belowDistance <= warmAheadPx) {
+      return {
+        shared,
+        zone: "warm",
+        priority: 120000 - belowDistance
+      };
+    }
+
+    return {
+      shared,
+      zone: "cold",
+      priority: 0
+    };
+  }
+
+  private isAutoSchedulableShared(shared: SharedImageTask): boolean {
+    return !shared.activeTask && !shared.resultUrl && shared.status !== "error" && shared.status !== "canceled" && shared.status !== "ignored";
   }
 
   private async testConnection(): Promise<void> {
