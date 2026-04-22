@@ -66,7 +66,16 @@ function createOverlay(
 }
 
 describe("OverlayManager", () => {
-  it("syncs overlay position with image bounds and toggles compact details", () => {
+  it("mounts image status inside the image container and toggles compact details", () => {
+    const container = document.createElement("div");
+    container.getBoundingClientRect = () =>
+      ({
+        left: 20,
+        top: 40,
+        width: 400,
+        height: 560
+      }) as DOMRect;
+
     const image = document.createElement("img");
     image.getBoundingClientRect = () =>
       ({
@@ -75,7 +84,8 @@ describe("OverlayManager", () => {
         width: 360,
         height: 520
       }) as DOMRect;
-    document.body.appendChild(image);
+    container.appendChild(image);
+    document.body.appendChild(container);
 
     const overlay = createOverlay();
 
@@ -94,23 +104,29 @@ describe("OverlayManager", () => {
       }
     ]);
 
-    const overlayItem = overlay.shadowRoot.querySelector(".mit-overlay-item") as HTMLDivElement;
-    const badge = overlay.shadowRoot.querySelector(".mit-status-card") as HTMLDivElement;
-    const compactToggle = overlay.shadowRoot.querySelector(".mit-compact-toggle") as HTMLButtonElement;
-    const overlayImage = overlay.shadowRoot.querySelector(".mit-overlay-image");
-    expect(overlayItem.style.left).toBe("24px");
-    expect(overlayItem.style.top).toBe("48px");
-    expect(overlayItem.style.width).toBe("360px");
-    expect(overlayItem.style.height).toBe("520px");
+    const overlayHost = container.querySelector('[data-mit-inline-status="image-1"]') as HTMLDivElement;
+    const badge = overlayHost.shadowRoot?.querySelector(".mit-status-card") as HTMLDivElement;
+    const compactToggle = overlayHost.shadowRoot?.querySelector(
+      ".mit-compact-toggle"
+    ) as HTMLButtonElement;
+    const overlayItemInDock = overlay.shadowRoot.querySelector(".mit-overlay-item");
+    expect(overlayHost.parentElement).toBe(container);
+    expect(container.style.position).toBe("relative");
+    expect(overlayHost.style.left).toBe("4px");
+    expect(overlayHost.style.top).toBe("8px");
+    expect(overlayHost.style.width).toBe("360px");
+    expect(overlayHost.style.height).toBe("520px");
     expect(badge.dataset.compact).toBe("true");
     expect(badge.dataset.expanded).toBe("false");
     expect(compactToggle.dataset.status).toBe("complete");
-    expect(overlayImage).toBeNull();
+    expect(overlayItemInDock).toBeNull();
 
     compactToggle.click();
     expect(badge.dataset.expanded).toBe("true");
 
     overlay.destroy();
+    expect(container.querySelector('[data-mit-inline-status="image-1"]')).toBeNull();
+    expect(container.style.position).toBe("");
   });
 
   it("starts collapsed and only opens the panel from settings", () => {

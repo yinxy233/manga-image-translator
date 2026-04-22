@@ -48,7 +48,8 @@ export interface OverlayManagerCallbacks {
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
 interface OverlayItemRefs {
-  container: HTMLDivElement;
+  host: HTMLDivElement;
+  mountTarget: HTMLElement | null;
   badge: HTMLDivElement;
   compactToggle: HTMLButtonElement;
   details: HTMLDivElement;
@@ -72,6 +73,12 @@ interface SettingsSectionOptions {
   title: string;
   content: HTMLElement;
   open?: boolean;
+}
+
+interface MountTargetState {
+  refCount: number;
+  originalPosition: string;
+  appliedRelativePosition: boolean;
 }
 
 function deriveAdapterStatus(adapterState: SiteAdapterState): string {
@@ -1043,14 +1050,287 @@ const STYLE_TEXT = `
   }
 `;
 
+const ITEM_STYLE_TEXT = `
+  :host {
+    all: initial;
+    position: absolute;
+    inset: auto auto auto auto;
+    display: block;
+    pointer-events: none;
+    z-index: 2147483645;
+    color: #131313;
+  }
+
+  :host,
+  :host * {
+    box-sizing: border-box;
+    font-family: "Avenir Next", "Segoe UI Variable", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  }
+
+  .mit-status-card {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    max-width: min(220px, calc(100% - 20px));
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(17, 24, 39, 0.56);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    color: rgba(249, 250, 251, 0.96);
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.14);
+    pointer-events: auto;
+    backdrop-filter: blur(10px) saturate(1.15);
+  }
+
+  .mit-status-card[data-compact="true"] {
+    max-width: none;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+
+  .mit-status-card[data-status="error"] {
+    background: rgba(127, 29, 29, 0.58);
+    border-color: rgba(254, 202, 202, 0.18);
+    color: rgba(254, 242, 242, 0.98);
+  }
+
+  .mit-status-card[data-status="complete"] {
+    background: rgba(22, 101, 52, 0.58);
+    border-color: rgba(220, 252, 231, 0.18);
+    color: rgba(240, 253, 244, 0.98);
+  }
+
+  .mit-status-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .mit-status-text {
+    font-size: 12px;
+    line-height: 1.3;
+    font-weight: 700;
+  }
+
+  .mit-status-queue {
+    margin-top: 4px;
+    font-size: 10px;
+    opacity: 0.84;
+  }
+
+  .mit-status-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 8px;
+  }
+
+  .mit-compact-toggle {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 999px;
+    background: rgba(17, 24, 39, 0.62);
+    color: #ffffff;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.16);
+    backdrop-filter: blur(10px) saturate(1.15);
+    font-size: 12px;
+    font-weight: 800;
+    line-height: 1;
+    position: relative;
+    overflow: hidden;
+    transition: opacity 180ms ease, transform 180ms ease, background 160ms ease;
+  }
+
+  .mit-compact-toggle[data-status="complete"] {
+    background: rgba(22, 101, 52, 0.76);
+  }
+
+  .mit-compact-toggle[data-status="error"] {
+    background: rgba(153, 27, 27, 0.78);
+  }
+
+  .mit-compact-toggle::after {
+    content: "";
+    position: absolute;
+    inset: 1px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    opacity: 0;
+  }
+
+  .mit-compact-toggle[data-status="processing"]::after,
+  .mit-compact-toggle[data-status="queued"]::after,
+  .mit-compact-toggle[data-status="pending"]::after {
+    opacity: 1;
+    border-top-color: rgba(255, 255, 255, 0.9);
+    border-right-color: rgba(255, 255, 255, 0.4);
+    border-bottom-color: rgba(255, 255, 255, 0.16);
+    border-left-color: rgba(255, 255, 255, 0.16);
+    animation: mit-spin 1.1s linear infinite;
+  }
+
+  .mit-status-card[data-status="complete"]:not([data-expanded="true"]) .mit-compact-toggle {
+    opacity: 0;
+    transform: scale(0.92);
+    pointer-events: none;
+  }
+
+  .mit-status-details {
+    display: block;
+  }
+
+  .mit-status-card[data-compact="true"] .mit-compact-toggle {
+    display: inline-flex;
+  }
+
+  .mit-status-card[data-compact="true"] .mit-status-details {
+    display: none;
+    margin-top: 6px;
+    max-width: min(220px, calc(100vw - 32px));
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(17, 24, 39, 0.58);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.14);
+    color: rgba(249, 250, 251, 0.96);
+    backdrop-filter: blur(10px) saturate(1.15);
+  }
+
+  .mit-status-card[data-compact="true"][data-status="complete"],
+  .mit-status-card[data-compact="true"][data-status="error"] {
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+
+  .mit-status-card[data-compact="true"][data-status="complete"] .mit-status-details {
+    background: rgba(22, 101, 52, 0.6);
+    color: rgba(240, 253, 244, 0.98);
+  }
+
+  .mit-status-card[data-compact="true"][data-status="error"] .mit-status-details {
+    background: rgba(127, 29, 29, 0.62);
+    color: rgba(254, 242, 242, 0.98);
+  }
+
+  .mit-status-card[data-compact="true"][data-expanded="true"] .mit-status-details {
+    display: block;
+  }
+
+  @keyframes mit-spin {
+    from {
+      transform: rotate(0deg);
+    }
+
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .mit-btn {
+    appearance: none;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    background: #ffffff;
+    color: #111827;
+    cursor: pointer;
+    transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+    min-height: 36px;
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1;
+  }
+
+  .mit-btn:hover {
+    background: #f3f4f6;
+  }
+
+  .mit-btn[data-tone="ghost"] {
+    background: #ffffff;
+    color: #111827;
+  }
+
+  .mit-btn[data-tone="danger"] {
+    border-color: #fca5a5;
+    background: #fef2f2;
+    color: #b91c1c;
+  }
+
+  .mit-status-card .mit-btn {
+    min-height: 26px;
+    padding: 5px 8px;
+    font-size: 10px;
+    border-radius: 999px;
+    border-color: rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.12);
+    color: inherit;
+    backdrop-filter: blur(8px);
+  }
+
+  .mit-status-card .mit-btn:hover {
+    background: rgba(255, 255, 255, 0.18);
+  }
+
+  .mit-status-card .mit-btn[data-tone="danger"] {
+    border-color: rgba(254, 202, 202, 0.18);
+    background: rgba(185, 28, 28, 0.24);
+    color: inherit;
+  }
+
+  .mit-btn:not([data-tone]) {
+    border-color: #2563eb;
+    background: #2563eb;
+    color: #ffffff;
+  }
+
+  @media (pointer: coarse) {
+    .mit-btn {
+      min-height: 42px;
+      font-size: 13px;
+    }
+
+    .mit-compact-toggle {
+      width: 30px;
+      height: 30px;
+      font-size: 13px;
+    }
+  }
+
+  @media (max-width: 720px) {
+    .mit-status-card {
+      left: 8px;
+      right: 8px;
+      top: auto;
+      bottom: 8px;
+      max-width: none;
+      padding: 8px 9px;
+    }
+
+    .mit-status-card[data-compact="true"] {
+      left: 8px;
+      right: auto;
+      top: 8px;
+      bottom: auto;
+    }
+  }
+`;
+
 export class OverlayManager {
   readonly shadowRoot: ShadowRoot;
 
   private readonly callbacks: OverlayManagerCallbacks;
 
   private readonly host: HTMLDivElement;
-
-  private readonly overlayLayer: HTMLDivElement;
 
   private readonly dock: HTMLDivElement;
 
@@ -1132,6 +1412,8 @@ export class OverlayManager {
 
   private readonly itemRefs = new Map<string, OverlayItemRefs>();
 
+  private readonly mountTargetStates = new WeakMap<HTMLElement, MountTargetState>();
+
   private viewModels = new Map<string, OverlayViewModel>();
 
   private readonly expandedCompactItems = new Set<string>();
@@ -1163,9 +1445,6 @@ export class OverlayManager {
 
     const root = document.createElement("div");
     root.className = "mit-root";
-
-    this.overlayLayer = document.createElement("div");
-    this.overlayLayer.className = "mit-overlay-layer";
 
     this.toastLayer = document.createElement("div");
     this.toastLayer.className = "mit-toast-layer";
@@ -1221,7 +1500,7 @@ export class OverlayManager {
     this.settingsFooter = this.buildSettingsFooter();
     this.dock.append(...this.buildDockContent());
 
-    root.append(this.overlayLayer, this.dock, this.launcherGroup, this.toastLayer);
+    root.append(this.dock, this.launcherGroup, this.toastLayer);
     this.shadowRoot.append(style, root);
 
     window.addEventListener("scroll", this.handleViewportChange, { passive: true });
@@ -1301,7 +1580,8 @@ export class OverlayManager {
     const nextIds = new Set(this.viewModels.keys());
     for (const [id, refs] of this.itemRefs.entries()) {
       if (!nextIds.has(id)) {
-        refs.container.remove();
+        this.mountOverlayItem(refs, null);
+        refs.host.remove();
         this.itemRefs.delete(id);
         this.expandedCompactItems.delete(id);
       }
@@ -1335,17 +1615,22 @@ export class OverlayManager {
         continue;
       }
 
+      const mountTarget = this.resolveMountTarget(viewModel.image);
       const rect = viewModel.image.getBoundingClientRect();
-      if (!viewModel.image.isConnected || rect.width <= 0 || rect.height <= 0) {
-        refs.container.style.display = "none";
+      if (!viewModel.image.isConnected || !mountTarget?.isConnected || rect.width <= 0 || rect.height <= 0) {
+        refs.host.style.display = "none";
+        this.mountOverlayItem(refs, null);
         continue;
       }
 
-      refs.container.style.display = "block";
-      refs.container.style.left = `${rect.left}px`;
-      refs.container.style.top = `${rect.top}px`;
-      refs.container.style.width = `${rect.width}px`;
-      refs.container.style.height = `${rect.height}px`;
+      this.mountOverlayItem(refs, mountTarget);
+
+      const mountRect = mountTarget.getBoundingClientRect();
+      refs.host.style.display = "block";
+      refs.host.style.left = `${rect.left - mountRect.left}px`;
+      refs.host.style.top = `${rect.top - mountRect.top}px`;
+      refs.host.style.width = `${rect.width}px`;
+      refs.host.style.height = `${rect.height}px`;
     }
   }
 
@@ -1362,6 +1647,11 @@ export class OverlayManager {
     window.removeEventListener("scroll", this.handleViewportChange);
     window.removeEventListener("resize", this.handleViewportChange);
     this.stopLauncherDrag();
+    for (const refs of this.itemRefs.values()) {
+      this.mountOverlayItem(refs, null);
+      refs.host.remove();
+    }
+    this.itemRefs.clear();
     this.host.remove();
   }
 
@@ -1853,8 +2143,12 @@ export class OverlayManager {
   }
 
   private createOverlayItem(id: string): OverlayItemRefs {
-    const container = document.createElement("div");
-    container.className = "mit-overlay-item";
+    const host = document.createElement("div");
+    host.dataset.mitInlineStatus = id;
+    const itemShadowRoot = host.attachShadow({ mode: "open" });
+
+    const style = document.createElement("style");
+    style.textContent = ITEM_STYLE_TEXT;
 
     const badge = document.createElement("div");
     badge.className = "mit-status-card";
@@ -1904,11 +2198,11 @@ export class OverlayManager {
     actions.append(toggle, retry, cancel, ignore);
     details.append(head, queue, actions);
     badge.append(compactToggle, details);
-    container.append(badge);
-    this.overlayLayer.appendChild(container);
+    itemShadowRoot.append(style, badge);
 
     const refs: OverlayItemRefs = {
-      container,
+      host,
+      mountTarget: null,
       badge,
       compactToggle,
       details,
@@ -1921,6 +2215,81 @@ export class OverlayManager {
     };
     this.itemRefs.set(id, refs);
     return refs;
+  }
+
+  private resolveMountTarget(image: HTMLImageElement): HTMLElement | null {
+    const parent = image.parentElement;
+    if (!parent) {
+      return null;
+    }
+
+    if (parent instanceof HTMLPictureElement) {
+      return parent.parentElement ?? parent;
+    }
+
+    return parent;
+  }
+
+  private mountOverlayItem(refs: OverlayItemRefs, nextTarget: HTMLElement | null): void {
+    if (refs.mountTarget === nextTarget && (!nextTarget || refs.host.parentElement === nextTarget)) {
+      return;
+    }
+
+    if (refs.mountTarget) {
+      this.releaseMountTarget(refs.mountTarget);
+    }
+
+    refs.mountTarget = nextTarget;
+    if (!nextTarget) {
+      refs.host.remove();
+      return;
+    }
+
+    this.prepareMountTarget(nextTarget);
+    nextTarget.appendChild(refs.host);
+  }
+
+  private prepareMountTarget(target: HTMLElement): void {
+    const state = this.mountTargetStates.get(target);
+    if (state) {
+      state.refCount += 1;
+      return;
+    }
+
+    const computedPosition = window.getComputedStyle(target).position;
+    const originalPosition = target.style.position;
+    const appliedRelativePosition = computedPosition === "" || computedPosition === "static";
+    if (appliedRelativePosition) {
+      target.style.position = "relative";
+    }
+
+    this.mountTargetStates.set(target, {
+      refCount: 1,
+      originalPosition,
+      appliedRelativePosition
+    });
+  }
+
+  private releaseMountTarget(target: HTMLElement): void {
+    const state = this.mountTargetStates.get(target);
+    if (!state) {
+      return;
+    }
+
+    if (state.refCount > 1) {
+      state.refCount -= 1;
+      return;
+    }
+
+    if (state.appliedRelativePosition) {
+      if (state.originalPosition) {
+        target.style.position = state.originalPosition;
+      } else {
+        target.style.removeProperty("position");
+      }
+    }
+
+    this.mountTargetStates.delete(target);
   }
 
   private readonly handleViewportChange = (): void => {
