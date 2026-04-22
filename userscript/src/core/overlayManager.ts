@@ -1008,6 +1008,8 @@ export class OverlayManager {
 
   private readonly autoCheckbox: HTMLInputElement;
 
+  private readonly cacheCheckbox: HTMLInputElement;
+
   private readonly concurrencyInput: HTMLInputElement;
 
   private readonly itemRefs = new Map<string, OverlayItemRefs>();
@@ -1089,6 +1091,7 @@ export class OverlayManager {
     this.maskDilationOffsetInput = document.createElement("input");
     this.transportSelect = document.createElement("select");
     this.autoCheckbox = document.createElement("input");
+    this.cacheCheckbox = document.createElement("input");
     this.concurrencyInput = document.createElement("input");
 
     this.settingsPanel = this.buildSettingsPanel(settings);
@@ -1142,6 +1145,7 @@ export class OverlayManager {
     this.maskDilationOffsetInput.value = String(settings.maskDilationOffset);
     this.transportSelect.value = settings.uploadTransport;
     this.autoCheckbox.checked = settings.autoTranslateEnabled;
+    this.cacheCheckbox.checked = settings.cacheEnabled;
     this.concurrencyInput.value = String(settings.maxConcurrency);
     this.launcherPosition = settings.launcherPosition;
     this.syncLauncherPosition();
@@ -1456,6 +1460,7 @@ export class OverlayManager {
     }
 
     this.autoCheckbox.type = "checkbox";
+    this.cacheCheckbox.type = "checkbox";
     this.boxThresholdInput.type = "number";
     this.boxThresholdInput.min = String(MIN_BOX_THRESHOLD);
     this.boxThresholdInput.max = String(MAX_BOX_THRESHOLD);
@@ -1507,7 +1512,8 @@ export class OverlayManager {
     advancedGrid.className = "mit-settings-grid";
     advancedGrid.append(
       this.createField("上传方式", this.transportSelect),
-      this.createSwitchField("自动启动", this.autoCheckbox, true),
+      this.createSwitchField("自动启动", this.autoCheckbox, "加载页面后自动开始扫描", true),
+      this.createSwitchField("启用缓存", this.cacheCheckbox, "重复图片优先读取本地结果", true),
       this.createField("并发上限", this.concurrencyInput)
     );
 
@@ -1562,6 +1568,7 @@ export class OverlayManager {
       maskDilationOffset: Number(this.maskDilationOffsetInput.value),
       uploadTransport: this.transportSelect.value as UserscriptSettings["uploadTransport"],
       autoTranslateEnabled: this.autoCheckbox.checked,
+      cacheEnabled: this.cacheCheckbox.checked,
       maxConcurrency: Number(this.concurrencyInput.value),
       launcherPosition: this.launcherPosition
     });
@@ -1584,7 +1591,12 @@ export class OverlayManager {
     return field;
   }
 
-  private createSwitchField(label: string, checkbox: HTMLInputElement, fullWidth = false): HTMLDivElement {
+  private createSwitchField(
+    label: string,
+    checkbox: HTMLInputElement,
+    captionText: string,
+    fullWidth = false
+  ): HTMLDivElement {
     const field = document.createElement("div");
     field.className = "mit-field";
     if (fullWidth) {
@@ -1598,7 +1610,7 @@ export class OverlayManager {
     switchContainer.className = "mit-switch";
 
     const caption = document.createElement("span");
-    caption.textContent = "加载页面后自动开始扫描";
+    caption.textContent = captionText;
 
     switchContainer.append(caption, checkbox);
     field.append(labelNode, switchContainer);

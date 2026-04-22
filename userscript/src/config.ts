@@ -15,6 +15,7 @@ export const DEFAULT_SETTINGS: UserscriptSettings = {
   maskDilationOffset: 30,
   uploadTransport: "multipart",
   autoTranslateEnabled: false,
+  cacheEnabled: true,
   maxConcurrency: 2,
   launcherPosition: null
 };

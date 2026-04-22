@@ -10,6 +10,7 @@ This directory contains a standalone Tampermonkey userscript project for connect
 - 结果以覆盖层方式贴在原图上，不改站点原始 DOM 结构
 - 支持远程 `serverBaseUrl + apiKey`
 - 优先使用浏览器 `fetch`，失败时自动回退到 `GM_xmlhttpRequest`
+- 支持本地持久化结果缓存，可在设置中关闭
 - 支持单图取消、重试、忽略，全局原图/译图切换
 
 ## Build
@@ -107,6 +108,7 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - `maskDilationOffset`
 - `uploadTransport`
 - `autoTranslateEnabled`
+- `cacheEnabled`
 - `maxConcurrency`
 
 推荐起始配置：
@@ -124,6 +126,7 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - `inpaintingSize`: `2048`
 - `maskDilationOffset`: `30`
 - `uploadTransport`: `multipart`
+- `cacheEnabled`: `true`
 - `maxConcurrency`: `2`
 
 这些参数会映射到服务端 `config`：
@@ -176,4 +179,5 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 
 - 油猴脚本是独立工程，不复用 `front/` 运行时。
 - 当前版本只面向桌面 Tampermonkey，不覆盖移动端浏览器。
-- 首版不做持久化结果缓存，也不做站点特化适配。
+- 会默认缓存已完成的翻译结果；如果站点图片经常变化或你不希望复用旧结果，可以在设置里关闭缓存。
+- 当前版本不做站点特化适配。

@@ -7,11 +7,13 @@ describe("sanitizeSettings", () => {
   it("keeps a valid upload transport mode", () => {
     const settings = sanitizeSettings({
       uploadTransport: "base64-json",
-      maxConcurrency: 3
+      maxConcurrency: 3,
+      cacheEnabled: false
     });
 
     expect(settings.uploadTransport).toBe("base64-json");
     expect(settings.maxConcurrency).toBe(3);
+    expect(settings.cacheEnabled).toBe(false);
   });
 
   it("falls back to the default upload transport for invalid values", () => {
@@ -97,5 +99,11 @@ describe("sanitizeSettings", () => {
     });
 
     expect(settings.launcherPosition).toBe(DEFAULT_SETTINGS.launcherPosition);
+  });
+
+  it("defaults cacheEnabled to the project default when omitted", () => {
+    const settings = sanitizeSettings({});
+
+    expect(settings.cacheEnabled).toBe(DEFAULT_SETTINGS.cacheEnabled);
   });
 });

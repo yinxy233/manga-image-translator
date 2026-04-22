@@ -1,4 +1,5 @@
 import { PROGRESS_TEXT_MAP } from "../config";
+import { TranslationResultCache } from "../cache";
 import { loadSettings, saveSettings } from "../storage";
 import type {
   ConnectionState,
@@ -25,6 +26,7 @@ interface SharedImageTask {
   message: string;
   queuePosition: string | null;
   activeTask: boolean;
+  servedFromCache: boolean;
 }
 
 interface ImageEntry {
@@ -82,7 +84,9 @@ function deriveFileName(sourceUrl: string): string {
 }
 
 export class TranslatorController {
-  private readonly transport = new TransportClient();
+  private readonly transport: TransportClient;
+
+  private readonly resultCache: TranslationResultCache;
 
   private readonly discovery: ImageDiscovery;
 
@@ -111,6 +115,9 @@ export class TranslatorController {
   private readonly sharedTasks = new Map<string, SharedImageTask>();
 
   constructor() {
+    this.transport = new TransportClient();
+    this.resultCache = new TranslationResultCache();
+
     this.queue = new TaskQueue({
       maxConcurrency: this.settings.maxConcurrency,
       paused: !this.enabled,
@@ -272,7 +279,8 @@ export class TranslatorController {
         status: "queued",
         message: "等待加入队列",
         queuePosition: null,
-        activeTask: false
+        activeTask: false,
+        servedFromCache: false
       };
       this.sharedTasks.set(signature, shared);
       this.enqueueSharedTask(shared);
@@ -299,6 +307,7 @@ export class TranslatorController {
     shared.status = "queued";
     shared.message = "等待抓取原图";
     shared.queuePosition = null;
+    shared.servedFromCache = false;
 
     const generation = this.generation;
     this.queue.enqueue({
@@ -325,6 +334,32 @@ export class TranslatorController {
           return;
         }
 
+        let cacheKey: string | null = null;
+        if (this.settings.cacheEnabled) {
+          shared.status = "processing";
+          shared.message = "检查本地缓存";
+          this.renderImages();
+
+          cacheKey = await this.resultCache.buildKey(sourceBlob, this.settings);
+          if (cacheKey) {
+            const cachedResult = await this.resultCache.get(cacheKey);
+            if (generation !== this.generation) {
+              return;
+            }
+
+            if (cachedResult) {
+              if (shared.resultUrl) {
+                URL.revokeObjectURL(shared.resultUrl);
+              }
+              shared.servedFromCache = true;
+              shared.resultUrl = URL.createObjectURL(cachedResult);
+              shared.message = "命中本地缓存";
+              this.renderImages();
+              return;
+            }
+          }
+        }
+
         shared.status = "processing";
         shared.message = "上传到翻译服务";
         this.renderImages();
@@ -341,6 +376,10 @@ export class TranslatorController {
           return;
         }
 
+        if (cacheKey) {
+          await this.resultCache.set(cacheKey, result);
+        }
+
         if (shared.resultUrl) {
           URL.revokeObjectURL(shared.resultUrl);
         }
@@ -352,9 +391,12 @@ export class TranslatorController {
         }
         shared.activeTask = false;
         shared.status = "complete";
-        shared.message = "翻译完成";
+        shared.message = shared.servedFromCache ? "已从缓存加载" : "翻译完成";
         shared.queuePosition = null;
-        this.connection = createConnectionState("翻译服务已响应", "success");
+        this.connection = createConnectionState(
+          shared.servedFromCache ? "已命中本地缓存" : "翻译服务已响应",
+          "success"
+        );
         this.renderChrome();
         this.renderImages();
       },

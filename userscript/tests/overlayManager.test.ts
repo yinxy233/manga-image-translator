@@ -180,6 +180,7 @@ describe("OverlayManager", () => {
         "遮罩膨胀",
         "上传方式",
         "自动启动",
+        "启用缓存",
         "并发上限"
       ])
     );
@@ -194,6 +195,9 @@ describe("OverlayManager", () => {
 
     const serverInput = overlay.shadowRoot.querySelector('input[placeholder="https://translator.example.com"]') as HTMLInputElement;
     const apiKeyInput = overlay.shadowRoot.querySelector('input[placeholder="可选接口密钥"]') as HTMLInputElement;
+    const cacheCheckbox = Array.from(
+      overlay.shadowRoot.querySelectorAll('.mit-switch input[type="checkbox"]')
+    )[1] as HTMLInputElement;
     const concurrencyInput = overlay.shadowRoot.querySelector(
       'input[type="number"][min="1"][max="6"]'
     ) as HTMLInputElement;
@@ -204,14 +208,17 @@ describe("OverlayManager", () => {
     expect(apiKeyInput.type).toBe("text");
     expect(apiKeyInput.autocomplete).toBe("off");
     expect(apiKeyInput.getAttribute("data-lpignore")).toBe("true");
+    expect(cacheCheckbox.checked).toBe(true);
 
     serverInput.value = " https://translator.internal ";
+    cacheCheckbox.checked = false;
     concurrencyInput.value = "4";
     saveButton.click();
 
     expect(onSaveSettings).toHaveBeenCalledWith(
       expect.objectContaining({
         serverBaseUrl: "https://translator.internal",
+        cacheEnabled: false,
         maxConcurrency: 4
       })
     );
