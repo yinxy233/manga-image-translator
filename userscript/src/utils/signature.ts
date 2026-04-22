@@ -4,7 +4,7 @@ function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, "");
 }
 
-function normalizeImageUrl(imageUrl: string): string {
+export function normalizeImageUrl(imageUrl: string): string {
   try {
     const url = new URL(imageUrl, window.location.href);
     url.hash = "";

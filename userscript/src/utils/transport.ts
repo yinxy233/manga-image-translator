@@ -1,4 +1,5 @@
 import type { HealthPayload, TranslationEvent, UserscriptSettings } from "../types";
+import { normalizeRenderedImageBlob } from "./image";
 import { decodeFrameText, readReadableStream, StreamFrameParser } from "./stream";
 
 type FetchImpl = typeof fetch;
@@ -232,6 +233,14 @@ function parseHealthPayload(rawPayload: string | HealthPayload): HealthPayload {
     return JSON.parse(rawPayload) as HealthPayload;
   }
   return rawPayload;
+}
+
+async function normalizeTranslationResponseBlob(blob: Blob): Promise<Blob> {
+  const normalizedBlob = await normalizeRenderedImageBlob(blob);
+  if (!normalizedBlob) {
+    throw new Error("Translation response did not return a valid PNG image.");
+  }
+  return normalizedBlob;
 }
 
 async function parseTranslationStream(
@@ -541,12 +550,14 @@ export class TransportClient {
           }
 
           if (response.response instanceof Blob) {
-            resolve(response.response);
+            void normalizeTranslationResponseBlob(response.response).then(resolve).catch(reject);
             return;
           }
 
           if (response.response instanceof ArrayBuffer) {
-            resolve(new Blob([response.response], { type: "image/png" }));
+            void normalizeTranslationResponseBlob(
+              new Blob([response.response], { type: "image/png" })
+            ).then(resolve).catch(reject);
             return;
           }
 
@@ -670,12 +681,14 @@ export class TransportClient {
             }
 
             if (response.response instanceof Blob) {
-              resolve(response.response);
+              void normalizeTranslationResponseBlob(response.response).then(resolve).catch(reject);
               return;
             }
 
             if (response.response instanceof ArrayBuffer) {
-              resolve(new Blob([response.response], { type: "image/png" }));
+              void normalizeTranslationResponseBlob(
+                new Blob([response.response], { type: "image/png" })
+              ).then(resolve).catch(reject);
               return;
             }
 

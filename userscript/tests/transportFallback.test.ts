@@ -3,6 +3,13 @@ import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS } from "../src/config";
 import { TransportClient } from "../src/utils/transport";
 
+const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+g5XsAAAAASUVORK5CYII=";
+const PNG_BYTES = Uint8Array.from(Buffer.from(PNG_BASE64, "base64"));
+
+function createPngBlob(type = "image/png"): Blob {
+  return new Blob([PNG_BYTES], { type });
+}
+
 function createFrame(code: number, payload: Uint8Array): Uint8Array {
   const frame = new Uint8Array(5 + payload.length);
   frame[0] = code;
@@ -73,7 +80,7 @@ describe("TransportClient", () => {
 
           details.onload?.({
             status: 200,
-            response: new Blob(["png-binary"], { type: "image/png" })
+            response: createPngBlob("application/octet-stream")
           });
         });
 
@@ -92,6 +99,7 @@ describe("TransportClient", () => {
     });
 
     expect(result).toBeInstanceOf(Blob);
+    expect(result.type).toBe("image/png");
     expect(onEvent).toHaveBeenCalledWith({
       code: 1,
       payload: new Uint8Array(),

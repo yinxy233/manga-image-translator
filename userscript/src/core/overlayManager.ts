@@ -37,6 +37,7 @@ export interface OverlayManagerCallbacks {
   onToggleSession: () => void;
   onToggleGlobalOriginal: () => void;
   onTestConnection: () => void;
+  onClearCache: () => void;
   onSaveSettings: (settings: UserscriptSettings) => void;
   onToggleImageOriginal: (id: string) => void;
   onRetryImage: (id: string) => void;
@@ -366,8 +367,7 @@ const STYLE_TEXT = `
     color: inherit;
   }
 
-  .mit-btn:not([data-tone]),
-  .mit-settings-actions .mit-btn {
+  .mit-btn:not([data-tone]) {
     border-color: #2563eb;
     background: #2563eb;
     color: #ffffff;
@@ -1710,10 +1710,13 @@ export class OverlayManager {
     footer.className = "mit-settings-actions";
     footer.dataset.visible = "false";
 
+    const clearCacheButton = this.createButton("清理缓存", "danger");
+    clearCacheButton.addEventListener("click", () => this.callbacks.onClearCache());
+
     const saveButton = this.createButton("保存设置", "primary");
     saveButton.addEventListener("click", () => this.saveSettings());
 
-    footer.append(saveButton);
+    footer.append(clearCacheButton, saveButton);
     return footer;
   }
 

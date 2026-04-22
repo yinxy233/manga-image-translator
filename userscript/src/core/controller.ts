@@ -142,6 +142,9 @@ export class TranslatorController {
       onTestConnection: () => {
         void this.testConnection();
       },
+      onClearCache: () => {
+        void this.clearCache();
+      },
       onSaveSettings: (settings) => this.applySettings(settings),
       onToggleImageOriginal: (id) => this.toggleImageOriginal(id),
       onRetryImage: (id) => this.retryImage(id),
@@ -341,7 +344,7 @@ export class TranslatorController {
           shared.message = "检查本地缓存";
           this.renderImages();
 
-          cacheKey = await this.resultCache.buildKey(sourceBlob, this.settings);
+          cacheKey = await this.resultCache.buildKey(sourceBlob, shared.sourceUrl, this.settings);
           if (cacheKey) {
             const cachedResult = await this.resultCache.get(cacheKey);
             if (generation !== this.generation) {
@@ -476,6 +479,16 @@ export class TranslatorController {
     }
     this.overlay.toast("设置已保存。后续任务将使用新配置。", "neutral");
     this.renderChrome();
+  }
+
+  private async clearCache(): Promise<void> {
+    const cleared = await this.resultCache.clear();
+    if (cleared) {
+      this.overlay.toast("本地缓存已清空。", "neutral");
+      return;
+    }
+
+    this.overlay.toast("清理本地缓存失败。", "error");
   }
 
   private resetRuntimeState(): void {

@@ -55,6 +55,7 @@ function createOverlay(
     onToggleSession: vi.fn(),
     onToggleGlobalOriginal: vi.fn(),
     onTestConnection: vi.fn(),
+    onClearCache: vi.fn(),
     onSaveSettings: vi.fn(),
     onToggleImageOriginal: vi.fn(),
     onRetryImage: vi.fn(),
@@ -151,7 +152,8 @@ describe("OverlayManager", () => {
 
   it("groups settings into collapsible sections and keeps save actions outside the scroll body", () => {
     const onSaveSettings = vi.fn();
-    const overlay = createOverlay({ onSaveSettings });
+    const onClearCache = vi.fn();
+    const overlay = createOverlay({ onSaveSettings, onClearCache });
 
     const settingsLauncher = overlay.shadowRoot.querySelector(
       '.mit-launcher-button[data-kind="settings"]'
@@ -230,7 +232,9 @@ describe("OverlayManager", () => {
       overlay.shadowRoot.querySelectorAll(".mit-adapter-status"),
       (node) => node.textContent
     );
-    const saveButton = settingsFooter.querySelector(".mit-btn") as HTMLButtonElement;
+    const footerButtons = Array.from(settingsFooter.querySelectorAll(".mit-btn")) as HTMLButtonElement[];
+    const clearButton = footerButtons.find((button) => button.textContent === "清理缓存") as HTMLButtonElement;
+    const saveButton = footerButtons.find((button) => button.textContent === "保存设置") as HTMLButtonElement;
 
     expect(serverInput.autocomplete).toBe("off");
     expect(serverInput.getAttribute("autocapitalize")).toBe("off");
@@ -244,8 +248,10 @@ describe("OverlayManager", () => {
     cacheCheckbox.checked = false;
     concurrencyInput.value = "4";
     adapterCheckboxes[0]!.checked = false;
+    clearButton.click();
     saveButton.click();
 
+    expect(onClearCache).toHaveBeenCalledTimes(1);
     expect(onSaveSettings).toHaveBeenCalledWith(
       expect.objectContaining({
         serverBaseUrl: "https://translator.internal",

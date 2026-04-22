@@ -1,5 +1,6 @@
 import type { UserscriptSettings } from "./types";
-import { buildConfigSignature } from "./utils/signature";
+import { normalizeRenderedImageBlob } from "./utils/image";
+import { buildConfigSignature, normalizeImageUrl } from "./utils/signature";
 
 const CACHE_DB_NAME = "mit-userscript-cache";
 const CACHE_STORE_NAME = "translation-results";
@@ -202,7 +203,11 @@ export class TranslationResultCache {
       new IndexedDbTranslationCacheStore(indexedDbFactory);
   }
 
-  async buildKey(imageBlob: Blob, settings: UserscriptSettings): Promise<string | null> {
+  async buildKey(
+    imageBlob: Blob,
+    sourceUrl: string,
+    settings: UserscriptSettings
+  ): Promise<string | null> {
     if (!this.digest) {
       return null;
     }
@@ -210,7 +215,8 @@ export class TranslationResultCache {
     try {
       const imageBytes = await blobToArrayBuffer(imageBlob);
       const imageHash = toHex(await this.digest("SHA-256", imageBytes));
-      return `${imageHash}|${buildConfigSignature(settings)}`;
+      const normalizedSourceUrl = normalizeImageUrl(sourceUrl);
+      return `${normalizedSourceUrl}|${imageHash}|${buildConfigSignature(settings)}`;
     } catch (error) {
       console.warn("[mit-userscript] Failed to build the translation cache key.", error);
       return null;
@@ -228,14 +234,38 @@ export class TranslationResultCache {
         return null;
       }
 
+      const normalizedBlob = await normalizeRenderedImageBlob(record.blob);
+      if (!normalizedBlob) {
+        await this.store.delete(key);
+        return null;
+      }
+
       await this.store.put({
         ...record,
+        blob: normalizedBlob,
+        byteSize: byteLengthOfBlob(normalizedBlob),
         lastAccessedAt: this.now()
       });
-      return record.blob;
+      return normalizedBlob;
     } catch (error) {
       console.warn("[mit-userscript] Failed to read the translation cache.", error);
       return null;
+    }
+  }
+
+  async clear(): Promise<boolean> {
+    const store = this.store;
+    if (!store) {
+      return true;
+    }
+
+    try {
+      const records = await store.list();
+      await Promise.all(records.map((record) => store.delete(record.key)));
+      return true;
+    } catch (error) {
+      console.warn("[mit-userscript] Failed to clear the translation cache.", error);
+      return false;
     }
   }
 
@@ -247,12 +277,18 @@ export class TranslationResultCache {
     const timestamp = this.now();
 
     try {
+      const normalizedBlob = await normalizeRenderedImageBlob(blob);
+      if (!normalizedBlob) {
+        console.warn("[mit-userscript] Skip caching an invalid rendered image blob.");
+        return;
+      }
+
       await this.store.put({
         key,
-        blob,
+        blob: normalizedBlob,
         createdAt: timestamp,
         lastAccessedAt: timestamp,
-        byteSize: byteLengthOfBlob(blob)
+        byteSize: byteLengthOfBlob(normalizedBlob)
       });
       await this.prune();
     } catch (error) {
