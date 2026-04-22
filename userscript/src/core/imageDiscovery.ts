@@ -2,7 +2,6 @@ import type { SiteAdapterDefinition } from "../adapters/types";
 import {
   MIN_NATURAL_HEIGHT,
   MIN_NATURAL_WIDTH,
-  PREFETCH_DISCOVERY_ROOT_MARGIN_PX,
   MIN_RENDER_HEIGHT,
   MIN_RENDER_WIDTH
 } from "../config";
@@ -109,7 +108,7 @@ export class ImageDiscovery {
         }
       },
       {
-        rootMargin: `${PREFETCH_DISCOVERY_ROOT_MARGIN_PX}px 0px`
+        rootMargin: "600px 0px"
       }
     );
 

@@ -9,10 +9,9 @@ interface TransportClientOptions {
   gmRequest?: GMRequestFn;
 }
 
-export interface TranslateImageOptions {
-  imageBlob?: Blob;
-  fileName?: string;
-  sourceUrl?: string;
+interface TranslateImageOptions {
+  imageBlob: Blob;
+  fileName: string;
   settings: UserscriptSettings;
   onEvent: (event: TranslationEvent) => void;
   signal?: AbortSignal;
@@ -37,12 +36,6 @@ interface TranslationConfigPayload {
     inpainting_size: number;
   };
   mask_dilation_offset: number;
-}
-
-interface HealthCacheEntry {
-  key: string;
-  payload: HealthPayload | null;
-  promise: Promise<HealthPayload> | null;
 }
 
 export class HttpStatusError extends Error {
@@ -177,16 +170,6 @@ async function createJsonTranslationPayload(
   });
 }
 
-function createRemoteUrlTranslationPayload(
-  sourceUrl: string,
-  settings: UserscriptSettings
-): string {
-  return JSON.stringify({
-    image: sourceUrl,
-    config: buildTranslationConfigPayload(settings)
-  });
-}
-
 async function createGMTranslationPayload(
   blob: Blob,
   fileName: string,
@@ -251,40 +234,6 @@ function parseHealthPayload(rawPayload: string | HealthPayload): HealthPayload {
   return rawPayload;
 }
 
-function deriveFileName(sourceUrl: string | undefined): string {
-  if (!sourceUrl) {
-    return "manga-page.png";
-  }
-
-  try {
-    const url = new URL(sourceUrl, window.location.href);
-    const lastSegment = url.pathname.split("/").pop();
-    if (lastSegment) {
-      return lastSegment;
-    }
-  } catch {
-    // noop
-  }
-
-  return "manga-page.png";
-}
-
-function isRemoteImageUrl(sourceUrl: string | undefined): sourceUrl is string {
-  return typeof sourceUrl === "string" && /^https?:\/\//i.test(sourceUrl);
-}
-
-function getHealthCacheKey(settings: UserscriptSettings): string {
-  return `${settings.serverBaseUrl.replace(/\/+$/, "")}|${settings.apiKey.trim()}`;
-}
-
-function shouldUseWebFastPath(health: HealthPayload | null): boolean {
-  return Boolean(health?.capabilities?.web_result_fastpath);
-}
-
-function supportsRemoteUrlTranslation(health: HealthPayload | null): boolean {
-  return Boolean(health?.capabilities?.source_url_translation);
-}
-
 async function parseTranslationStream(
   stream: ReadableStream<Uint8Array>,
   onEvent: (event: TranslationEvent) => void,
@@ -330,143 +279,12 @@ export class TransportClient {
 
   private readonly gmRequest: GMRequestFn;
 
-  private readonly healthCache: HealthCacheEntry = {
-    key: "",
-    payload: null,
-    promise: null
-  };
-
   constructor(options: TransportClientOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.gmRequest = getGMRequest(options.gmRequest);
   }
 
   async checkHealth(settings: UserscriptSettings, signal?: AbortSignal): Promise<HealthPayload> {
-    const cacheKey = getHealthCacheKey(settings);
-    if (this.healthCache.key === cacheKey) {
-      if (this.healthCache.payload) {
-        return this.healthCache.payload;
-      }
-      if (this.healthCache.promise) {
-        return this.healthCache.promise;
-      }
-    } else {
-      this.healthCache.key = cacheKey;
-      this.healthCache.payload = null;
-      this.healthCache.promise = null;
-    }
-
-    const promise = this.fetchHealth(settings, signal)
-      .then((health) => {
-        this.healthCache.payload = health;
-        this.healthCache.promise = null;
-        return health;
-      })
-      .catch((error) => {
-        this.healthCache.promise = null;
-        throw error;
-      });
-
-    this.healthCache.promise = promise;
-    return promise;
-  }
-
-  getCachedHealth(settings: UserscriptSettings): HealthPayload | null {
-    return this.healthCache.key === getHealthCacheKey(settings) ? this.healthCache.payload : null;
-  }
-
-  async shouldUseRemoteUrl(settings: UserscriptSettings, sourceUrl: string | undefined): Promise<boolean> {
-    if (!isRemoteImageUrl(sourceUrl)) {
-      return false;
-    }
-
-    if (settings.sourceTransferMode === "blob-upload") {
-      return false;
-    }
-
-    if (settings.sourceTransferMode === "remote-url") {
-      return true;
-    }
-
-    const health = await this.getAvailableHealth(settings);
-    return supportsRemoteUrlTranslation(health);
-  }
-
-  async fetchImageBlob(imageUrl: string, signal?: AbortSignal): Promise<Blob> {
-    try {
-      const response = await this.fetchImpl(imageUrl, {
-        method: "GET",
-        credentials: "include",
-        signal
-      });
-      if (!response.ok) {
-        throw await toHttpStatusError(response);
-      }
-      return await response.blob();
-    } catch {
-      return this.fetchImageBlobWithGM(imageUrl, signal);
-    }
-  }
-
-  async fetchFinalImage(
-    settings: UserscriptSettings,
-    folderName: string,
-    signal?: AbortSignal
-  ): Promise<Blob> {
-    const endpoint = joinServerUrl(settings.serverBaseUrl, `/result/${encodeURIComponent(folderName)}/final.png`);
-
-    try {
-      const response = await this.fetchImpl(endpoint, {
-        method: "GET",
-        headers: buildHeaders(settings),
-        signal
-      });
-      if (!response.ok) {
-        throw await toHttpStatusError(response);
-      }
-      return await response.blob();
-    } catch (error) {
-      if (!shouldFallback(error)) {
-        throw error;
-      }
-      return this.fetchBlobWithGM(endpoint, buildHeaders(settings), signal, "Failed to fetch the translated image.");
-    }
-  }
-
-  async translateImage(options: TranslateImageOptions): Promise<Blob> {
-    const health = await this.getAvailableHealth(options.settings);
-
-    if (await this.shouldUseRemoteUrl(options.settings, options.sourceUrl)) {
-      try {
-        return await this.translateImageWithRemoteUrl(options, health);
-      } catch (error) {
-        if (isAbortError(error)) {
-          throw error;
-        }
-      }
-    }
-
-    const imageBlob = options.imageBlob ?? (options.sourceUrl
-      ? await this.fetchImageBlob(options.sourceUrl, options.signal)
-      : null);
-    if (!imageBlob) {
-      throw new Error("Translation requires either an image blob or a remote source URL.");
-    }
-
-    const blobOptions: TranslateImageOptions = {
-      ...options,
-      imageBlob,
-      fileName: options.fileName ?? deriveFileName(options.sourceUrl)
-    };
-
-    if (options.settings.uploadTransport === "base64-json") {
-      return this.translateImageWithJsonTransport(blobOptions, health);
-    }
-
-    return this.translateImageWithMultipartTransport(blobOptions, health);
-  }
-
-  private async fetchHealth(settings: UserscriptSettings, signal?: AbortSignal): Promise<HealthPayload> {
     try {
       const response = await this.fetchImpl(joinServerUrl(settings.serverBaseUrl, "/health"), {
         method: "GET",
@@ -485,99 +303,68 @@ export class TransportClient {
     }
   }
 
-  private async getAvailableHealth(settings: UserscriptSettings): Promise<HealthPayload | null> {
-    const cachedHealth = this.getCachedHealth(settings);
-    if (cachedHealth) {
-      return cachedHealth;
-    }
-
+  async fetchImageBlob(imageUrl: string, signal?: AbortSignal): Promise<Blob> {
     try {
-      return await this.checkHealth(settings);
+      const response = await this.fetchImpl(imageUrl, {
+        method: "GET",
+        credentials: "include",
+        signal
+      });
+      if (!response.ok) {
+        throw await toHttpStatusError(response);
+      }
+      return await response.blob();
     } catch {
-      return null;
+      return this.fetchImageBlobWithGM(imageUrl, signal);
     }
   }
 
-  private async translateImageWithRemoteUrl(
-    options: TranslateImageOptions,
-    health: HealthPayload | null
-  ): Promise<Blob> {
-    if (!isRemoteImageUrl(options.sourceUrl)) {
-      throw new Error("Remote URL translation requires an HTTP(S) source URL.");
+  async translateImage(options: TranslateImageOptions): Promise<Blob> {
+    if (options.settings.uploadTransport === "base64-json") {
+      return this.translateImageWithJsonTransport(options);
     }
 
-    const jsonPayload = createRemoteUrlTranslationPayload(options.sourceUrl, options.settings);
-    const streamPath = shouldUseWebFastPath(health)
-      ? "/translate/image/stream/web"
-      : "/translate/image/stream";
-
-    return this.translateJsonPayload(options, jsonPayload, streamPath, "/translate/image");
+    return this.translateImageWithMultipartTransport(options);
   }
 
-  private async translateImageWithMultipartTransport(
-    options: TranslateImageOptions,
-    health: HealthPayload | null
-  ): Promise<Blob> {
-    const streamPath = shouldUseWebFastPath(health)
-      ? "/translate/with-form/image/stream/web"
-      : "/translate/with-form/image/stream";
-
+  private async translateImageWithMultipartTransport(options: TranslateImageOptions): Promise<Blob> {
     try {
-      return await this.translateImageWithFetch(options, streamPath);
+      return await this.translateImageWithFetch(options);
     } catch (fetchError) {
       if (!shouldFallback(fetchError)) {
         throw fetchError;
       }
 
       try {
-        return await this.translateImageWithGMStream(options, streamPath);
+        return await this.translateImageWithGMStream(options);
       } catch (gmStreamError) {
         if (!shouldFallback(gmStreamError)) {
           throw gmStreamError;
         }
 
-        return this.translateImageWithGMBlob(options, "/translate/with-form/image");
+        return this.translateImageWithGMBlob(options);
       }
     }
   }
 
-  private async translateImageWithJsonTransport(
-    options: TranslateImageOptions,
-    health: HealthPayload | null
-  ): Promise<Blob> {
-    if (!options.imageBlob) {
-      throw new Error("JSON transport requires an image blob.");
-    }
-
+  private async translateImageWithJsonTransport(options: TranslateImageOptions): Promise<Blob> {
     const jsonPayload = await createJsonTranslationPayload(options.imageBlob, options.settings);
-    const streamPath = shouldUseWebFastPath(health)
-      ? "/translate/image/stream/web"
-      : "/translate/image/stream";
 
-    return this.translateJsonPayload(options, jsonPayload, streamPath, "/translate/image");
-  }
-
-  private async translateJsonPayload(
-    options: TranslateImageOptions,
-    jsonPayload: string,
-    streamPath: string,
-    blobPath: string
-  ): Promise<Blob> {
     try {
-      return await this.translateImageWithJsonFetch(options, jsonPayload, streamPath);
+      return await this.translateImageWithJsonFetch(options, jsonPayload);
     } catch (fetchError) {
       if (!shouldFallback(fetchError)) {
         throw fetchError;
       }
 
       try {
-        return await this.translateImageWithJsonGMStream(options, jsonPayload, streamPath);
+        return await this.translateImageWithJsonGMStream(options, jsonPayload);
       } catch (gmStreamError) {
         if (!shouldFallback(gmStreamError)) {
           throw gmStreamError;
         }
 
-        return this.translateImageWithJsonGMBlob(options, jsonPayload, blobPath);
+        return this.translateImageWithJsonGMBlob(options, jsonPayload);
       }
     }
   }
@@ -617,20 +404,10 @@ export class TransportClient {
   }
 
   private async fetchImageBlobWithGM(imageUrl: string, signal?: AbortSignal): Promise<Blob> {
-    return this.fetchBlobWithGM(imageUrl, undefined, signal, "Failed to fetch the source image.");
-  }
-
-  private async fetchBlobWithGM(
-    url: string,
-    headers: Record<string, string> | undefined,
-    signal: AbortSignal | undefined,
-    errorMessage: string
-  ): Promise<Blob> {
     return new Promise<Blob>((resolve, reject) => {
       const request = this.gmRequest({
         method: "GET",
-        url,
-        headers,
+        url: imageUrl,
         responseType: "blob",
         fetch: true,
         onload: (response) => {
@@ -649,10 +426,10 @@ export class TransportClient {
             return;
           }
 
-          reject(new Error("GM request did not return a blob response."));
+          reject(new Error("GM image request did not return a blob response."));
         },
-        onerror: () => reject(new Error(errorMessage)),
-        ontimeout: () => reject(new Error("Request timed out."))
+        onerror: () => reject(new Error("Failed to fetch the source image.")),
+        ontimeout: () => reject(new Error("Image download timed out."))
       });
 
       signal?.addEventListener("abort", () => request.abort(), { once: true });
@@ -661,15 +438,17 @@ export class TransportClient {
 
   private async translateImageWithJsonFetch(
     options: TranslateImageOptions,
-    jsonPayload: string,
-    path: string
+    jsonPayload: string
   ): Promise<Blob> {
-    const response = await this.fetchImpl(joinServerUrl(options.settings.serverBaseUrl, path), {
-      method: "POST",
-      headers: buildJsonHeaders(options.settings),
-      body: jsonPayload,
-      signal: options.signal
-    });
+    const response = await this.fetchImpl(
+      joinServerUrl(options.settings.serverBaseUrl, "/translate/image/stream"),
+      {
+        method: "POST",
+        headers: buildJsonHeaders(options.settings),
+        body: jsonPayload,
+        signal: options.signal
+      }
+    );
 
     if (!response.ok) {
       throw await toHttpStatusError(response);
@@ -684,15 +463,14 @@ export class TransportClient {
 
   private async translateImageWithJsonGMStream(
     options: TranslateImageOptions,
-    jsonPayload: string,
-    path: string
+    jsonPayload: string
   ): Promise<Blob> {
     return new Promise<Blob>((resolve, reject) => {
       let streamStarted = false;
 
       const request = this.gmRequest({
         method: "POST",
-        url: joinServerUrl(options.settings.serverBaseUrl, path),
+        url: joinServerUrl(options.settings.serverBaseUrl, "/translate/image/stream"),
         headers: buildJsonHeaders(options.settings),
         data: jsonPayload,
         responseType: "stream",
@@ -738,8 +516,7 @@ export class TransportClient {
 
   private async translateImageWithJsonGMBlob(
     options: TranslateImageOptions,
-    jsonPayload: string,
-    path: string
+    jsonPayload: string
   ): Promise<Blob> {
     options.onEvent({
       code: 1,
@@ -750,7 +527,7 @@ export class TransportClient {
     return new Promise<Blob>((resolve, reject) => {
       const request = this.gmRequest({
         method: "POST",
-        url: joinServerUrl(options.settings.serverBaseUrl, path),
+        url: joinServerUrl(options.settings.serverBaseUrl, "/translate/image"),
         headers: buildJsonHeaders(options.settings),
         data: jsonPayload,
         responseType: "blob",
@@ -783,24 +560,16 @@ export class TransportClient {
     });
   }
 
-  private async translateImageWithFetch(
-    options: TranslateImageOptions,
-    path: string
-  ): Promise<Blob> {
-    if (!options.imageBlob) {
-      throw new Error("Multipart transport requires an image blob.");
-    }
-
-    const response = await this.fetchImpl(joinServerUrl(options.settings.serverBaseUrl, path), {
-      method: "POST",
-      headers: buildHeaders(options.settings),
-      body: createTranslationFormData(
-        options.imageBlob,
-        options.fileName ?? deriveFileName(options.sourceUrl),
-        options.settings
-      ),
-      signal: options.signal
-    });
+  private async translateImageWithFetch(options: TranslateImageOptions): Promise<Blob> {
+    const response = await this.fetchImpl(
+      joinServerUrl(options.settings.serverBaseUrl, "/translate/with-form/image/stream"),
+      {
+        method: "POST",
+        headers: buildHeaders(options.settings),
+        body: createTranslationFormData(options.imageBlob, options.fileName, options.settings),
+        signal: options.signal
+      }
+    );
 
     if (!response.ok) {
       throw await toHttpStatusError(response);
@@ -813,26 +582,19 @@ export class TransportClient {
     return parseTranslationStream(response.body, options.onEvent, options.signal);
   }
 
-  private async translateImageWithGMStream(
-    options: TranslateImageOptions,
-    path: string
-  ): Promise<Blob> {
-    if (!options.imageBlob) {
-      throw new Error("Multipart transport requires an image blob.");
-    }
-
+  private async translateImageWithGMStream(options: TranslateImageOptions): Promise<Blob> {
     return new Promise<Blob>((resolve, reject) => {
       void (async () => {
         const multipartPayload = await createGMTranslationPayload(
-          options.imageBlob as Blob,
-          options.fileName ?? deriveFileName(options.sourceUrl),
+          options.imageBlob,
+          options.fileName,
           options.settings
         );
         let streamStarted = false;
 
         const request = this.gmRequest({
           method: "POST",
-          url: joinServerUrl(options.settings.serverBaseUrl, path),
+          url: joinServerUrl(options.settings.serverBaseUrl, "/translate/with-form/image/stream"),
           headers: multipartPayload.headers,
           data: multipartPayload.data,
           responseType: "stream",
@@ -877,14 +639,7 @@ export class TransportClient {
     });
   }
 
-  private async translateImageWithGMBlob(
-    options: TranslateImageOptions,
-    path: string
-  ): Promise<Blob> {
-    if (!options.imageBlob) {
-      throw new Error("Multipart transport requires an image blob.");
-    }
-
+  private async translateImageWithGMBlob(options: TranslateImageOptions): Promise<Blob> {
     options.onEvent({
       code: 1,
       payload: new Uint8Array(),
@@ -894,14 +649,14 @@ export class TransportClient {
     return new Promise<Blob>((resolve, reject) => {
       void (async () => {
         const multipartPayload = await createGMTranslationPayload(
-          options.imageBlob as Blob,
-          options.fileName ?? deriveFileName(options.sourceUrl),
+          options.imageBlob,
+          options.fileName,
           options.settings
         );
 
         const request = this.gmRequest({
           method: "POST",
-          url: joinServerUrl(options.settings.serverBaseUrl, path),
+          url: joinServerUrl(options.settings.serverBaseUrl, "/translate/with-form/image"),
           headers: multipartPayload.headers,
           data: multipartPayload.data,
           responseType: "blob",

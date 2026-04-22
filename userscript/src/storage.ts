@@ -45,12 +45,6 @@ export function sanitizeSettings(settings: Partial<UserscriptSettings>): Userscr
     settings.uploadTransport === "base64-json" || settings.uploadTransport === "multipart"
       ? settings.uploadTransport
       : DEFAULT_SETTINGS.uploadTransport;
-  const sourceTransferMode =
-    settings.sourceTransferMode === "blob-upload" ||
-    settings.sourceTransferMode === "remote-url" ||
-    settings.sourceTransferMode === "auto"
-      ? settings.sourceTransferMode
-      : DEFAULT_SETTINGS.sourceTransferMode;
   const launcherPosition = sanitizeLauncherPosition(settings.launcherPosition);
   const languageCode = String(settings.targetLanguage ?? DEFAULT_SETTINGS.targetLanguage)
     .trim()
@@ -111,7 +105,6 @@ export function sanitizeSettings(settings: Partial<UserscriptSettings>): Userscr
     inpaintingSize,
     maskDilationOffset,
     uploadTransport,
-    sourceTransferMode,
     autoTranslateEnabled: Boolean(settings.autoTranslateEnabled ?? DEFAULT_SETTINGS.autoTranslateEnabled),
     cacheEnabled: Boolean(settings.cacheEnabled ?? DEFAULT_SETTINGS.cacheEnabled),
     maxConcurrency,
