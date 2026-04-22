@@ -49,7 +49,6 @@ const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
 interface OverlayItemRefs {
   container: HTMLDivElement;
-  result: HTMLImageElement;
   badge: HTMLDivElement;
   compactToggle: HTMLButtonElement;
   details: HTMLDivElement;
@@ -127,16 +126,6 @@ const STYLE_TEXT = `
     position: fixed;
     inset: auto auto auto auto;
     pointer-events: none;
-  }
-
-  .mit-overlay-image {
-    width: 100%;
-    height: 100%;
-    object-fit: fill;
-    display: block;
-    border-radius: 8px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
-    transition: opacity 160ms ease;
   }
 
   .mit-status-card {
@@ -1326,8 +1315,6 @@ export class OverlayManager {
       refs.status.textContent = viewModel.message;
       refs.queue.textContent = viewModel.queuePosition ? `队列位置 #${viewModel.queuePosition}` : "";
       refs.queue.style.display = viewModel.queuePosition ? "block" : "none";
-      refs.result.src = viewModel.resultUrl ?? "";
-      refs.result.style.opacity = viewModel.showOriginal || !viewModel.resultUrl ? "0" : "1";
       refs.compactToggle.dataset.status = viewModel.status;
       refs.compactToggle.title = viewModel.message;
       refs.compactToggle.setAttribute("aria-label", viewModel.message);
@@ -1869,10 +1856,6 @@ export class OverlayManager {
     const container = document.createElement("div");
     container.className = "mit-overlay-item";
 
-    const result = document.createElement("img");
-    result.className = "mit-overlay-image";
-    result.alt = "Translated manga overlay";
-
     const badge = document.createElement("div");
     badge.className = "mit-status-card";
 
@@ -1921,12 +1904,11 @@ export class OverlayManager {
     actions.append(toggle, retry, cancel, ignore);
     details.append(head, queue, actions);
     badge.append(compactToggle, details);
-    container.append(result, badge);
+    container.append(badge);
     this.overlayLayer.appendChild(container);
 
     const refs: OverlayItemRefs = {
       container,
-      result,
       badge,
       compactToggle,
       details,

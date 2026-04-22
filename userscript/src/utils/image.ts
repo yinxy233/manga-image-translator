@@ -1,10 +1,33 @@
+const MANAGED_IMAGE_SOURCE_ATTRIBUTE = "data-mit-managed-source-url";
+
+function isBlobUrl(imageUrl: string): boolean {
+  return imageUrl.startsWith("blob:");
+}
+
 export function isRasterImageUrl(imageUrl: string): boolean {
   const normalized = imageUrl.toLowerCase();
   return !normalized.endsWith(".svg") && !normalized.startsWith("data:image/svg");
 }
 
+export function getManagedImageSourceUrl(image: HTMLImageElement): string | null {
+  return image.getAttribute(MANAGED_IMAGE_SOURCE_ATTRIBUTE);
+}
+
+export function setManagedImageSourceUrl(image: HTMLImageElement, sourceUrl: string): void {
+  image.setAttribute(MANAGED_IMAGE_SOURCE_ATTRIBUTE, sourceUrl);
+}
+
+export function clearManagedImageSourceUrl(image: HTMLImageElement): void {
+  image.removeAttribute(MANAGED_IMAGE_SOURCE_ATTRIBUTE);
+}
+
 export function resolveDefaultImageSource(image: HTMLImageElement): string | null {
-  return image.currentSrc || image.src || null;
+  const currentSource = image.currentSrc || image.src || null;
+  const managedSource = getManagedImageSourceUrl(image);
+  if (managedSource && currentSource && isBlobUrl(currentSource)) {
+    return managedSource;
+  }
+  return currentSource;
 }
 
 const PNG_SIGNATURE = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);

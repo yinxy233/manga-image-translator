@@ -7,7 +7,7 @@ This directory contains a standalone Tampermonkey userscript project for connect
 ## Features
 
 - 手动启动当前页面翻译，之后自动追踪懒加载图片
-- 结果以覆盖层方式贴在原图上，不改站点原始 DOM 结构
+- 译图直接替换原图，同时保留图片角上的状态卡与原图切换
 - 支持通用兜底 + 可扩展站点适配器，可按站点控制候选图片区范围
 - 支持远程 `serverBaseUrl + apiKey`
 - 优先使用浏览器 `fetch`，失败时自动回退到 `GM_xmlhttpRequest`

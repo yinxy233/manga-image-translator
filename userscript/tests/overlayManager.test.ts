@@ -97,6 +97,7 @@ describe("OverlayManager", () => {
     const overlayItem = overlay.shadowRoot.querySelector(".mit-overlay-item") as HTMLDivElement;
     const badge = overlay.shadowRoot.querySelector(".mit-status-card") as HTMLDivElement;
     const compactToggle = overlay.shadowRoot.querySelector(".mit-compact-toggle") as HTMLButtonElement;
+    const overlayImage = overlay.shadowRoot.querySelector(".mit-overlay-image");
     expect(overlayItem.style.left).toBe("24px");
     expect(overlayItem.style.top).toBe("48px");
     expect(overlayItem.style.width).toBe("360px");
@@ -104,6 +105,7 @@ describe("OverlayManager", () => {
     expect(badge.dataset.compact).toBe("true");
     expect(badge.dataset.expanded).toBe("false");
     expect(compactToggle.dataset.status).toBe("complete");
+    expect(overlayImage).toBeNull();
 
     compactToggle.click();
     expect(badge.dataset.expanded).toBe("true");

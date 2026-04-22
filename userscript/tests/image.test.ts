@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeRenderedImageBlob } from "../src/utils/image";
+import {
+  clearManagedImageSourceUrl,
+  getManagedImageSourceUrl,
+  normalizeRenderedImageBlob,
+  resolveDefaultImageSource,
+  setManagedImageSourceUrl
+} from "../src/utils/image";
 
 const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+g5XsAAAAASUVORK5CYII=";
 const PNG_BYTES = Uint8Array.from(Buffer.from(PNG_BASE64, "base64"));
@@ -32,5 +38,35 @@ describe("normalizeRenderedImageBlob", () => {
     );
 
     expect(normalizedBlob).toBeNull();
+  });
+});
+
+describe("resolveDefaultImageSource", () => {
+  it("returns the managed source when the image is displaying a blob result", () => {
+    const image = document.createElement("img");
+    Object.defineProperty(image, "currentSrc", {
+      configurable: true,
+      value: "blob:https://example.com/translated"
+    });
+
+    setManagedImageSourceUrl(image, "https://example.com/original.png");
+
+    expect(resolveDefaultImageSource(image)).toBe("https://example.com/original.png");
+    expect(getManagedImageSourceUrl(image)).toBe("https://example.com/original.png");
+  });
+
+  it("prefers the current non-blob source even when a managed source marker exists", () => {
+    const image = document.createElement("img");
+    Object.defineProperty(image, "currentSrc", {
+      configurable: true,
+      value: "https://example.com/current.png"
+    });
+
+    setManagedImageSourceUrl(image, "https://example.com/original.png");
+
+    expect(resolveDefaultImageSource(image)).toBe("https://example.com/current.png");
+
+    clearManagedImageSourceUrl(image);
+    expect(getManagedImageSourceUrl(image)).toBeNull();
   });
 });

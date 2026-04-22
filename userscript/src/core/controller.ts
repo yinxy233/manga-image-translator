@@ -15,6 +15,13 @@ import type {
 import { buildImageSignature } from "../utils/signature";
 import { HttpStatusError, TransportClient } from "../utils/transport";
 import { type DiscoveredImageCandidate, ImageDiscovery } from "./imageDiscovery";
+import {
+  createImagePresentationState,
+  refreshImagePresentationState,
+  releaseImagePresentation,
+  syncImagePresentation,
+  type ImagePresentationState
+} from "./imagePresentation";
 import { OverlayManager } from "./overlayManager";
 import { type CancelReason, TaskQueue } from "./taskQueue";
 
@@ -35,6 +42,7 @@ interface ImageEntry {
   id: string;
   image: HTMLImageElement;
   shared: SharedImageTask;
+  presentation: ImagePresentationState;
   showOriginal: boolean;
   ignored: boolean;
   canceled: boolean;
@@ -191,13 +199,20 @@ export class TranslatorController {
         message = "已取消此图片";
       }
 
+      const showOriginal = this.globalShowOriginal || entry.showOriginal;
+      syncImagePresentation(entry.image, entry.presentation, {
+        sourceUrl: entry.shared.sourceUrl,
+        resultUrl: entry.shared.resultUrl,
+        showOriginal
+      });
+
       models.push({
         id: entry.id,
         image: entry.image,
         status,
         message,
         resultUrl: entry.shared.resultUrl,
-        showOriginal: this.globalShowOriginal || entry.showOriginal,
+        showOriginal,
         queuePosition: entry.ignored || entry.canceled ? null : entry.shared.queuePosition,
         canRetry: status === "error" || status === "canceled" || status === "ignored",
         canCancel: !entry.ignored && !entry.canceled && entry.shared.activeTask,
@@ -261,11 +276,14 @@ export class TranslatorController {
     if (existingId) {
       const existingEntry = this.imageEntries.get(existingId);
       if (existingEntry?.shared.signature === signature) {
+        refreshImagePresentationState(existingEntry.image, existingEntry.presentation, sourceUrl);
         return;
       }
       if (existingEntry) {
         existingEntry.shared.imageIds.delete(existingId);
+        releaseImagePresentation(existingEntry.image, existingEntry.presentation);
         this.imageEntries.delete(existingId);
+        this.cancelSharedTaskIfUnused(existingEntry.shared, "canceled");
       }
     }
 
@@ -295,6 +313,7 @@ export class TranslatorController {
       id: imageId,
       image,
       shared,
+      presentation: createImagePresentationState(image, sourceUrl),
       showOriginal: false,
       ignored: false,
       canceled: false
@@ -494,6 +513,9 @@ export class TranslatorController {
   private resetRuntimeState(): void {
     this.generation += 1;
     this.queue.reset("canceled");
+    for (const entry of this.imageEntries.values()) {
+      releaseImagePresentation(entry.image, entry.presentation);
+    }
     for (const shared of this.sharedTasks.values()) {
       if (shared.resultUrl) {
         URL.revokeObjectURL(shared.resultUrl);
