@@ -31,6 +31,7 @@ export type UploadTransport = "multipart" | "base64-json";
 export type DetectorKey = "default" | "dbconvnext" | "ctd" | "craft" | "paddle" | "none";
 export type InpainterKey = "default" | "lama_large" | "lama_mpe" | "sd" | "none" | "original";
 export type RenderDirection = "auto" | "horizontal" | "vertical";
+export type AdapterOverrides = Record<string, boolean>;
 
 export interface LauncherPosition {
   x: number;
@@ -55,6 +56,7 @@ export interface UserscriptSettings {
   cacheEnabled: boolean;
   maxConcurrency: number;
   launcherPosition: LauncherPosition | null;
+  adapterOverrides: AdapterOverrides;
 }
 
 export interface HealthPayload {

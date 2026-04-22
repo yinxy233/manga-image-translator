@@ -1,3 +1,5 @@
+import { resolveActiveSiteAdapters, resolveSiteAdapterStates } from "../adapters";
+import type { SiteAdapterState } from "../adapters/types";
 import { PROGRESS_TEXT_MAP } from "../config";
 import { TranslationResultCache } from "../cache";
 import { loadSettings, saveSettings } from "../storage";
@@ -12,7 +14,7 @@ import type {
 } from "../types";
 import { buildImageSignature } from "../utils/signature";
 import { HttpStatusError, TransportClient } from "../utils/transport";
-import { ImageDiscovery, getImageSource } from "./imageDiscovery";
+import { type DiscoveredImageCandidate, ImageDiscovery } from "./imageDiscovery";
 import { OverlayManager } from "./overlayManager";
 import { type CancelReason, TaskQueue } from "./taskQueue";
 
@@ -88,7 +90,7 @@ export class TranslatorController {
 
   private readonly resultCache: TranslationResultCache;
 
-  private readonly discovery: ImageDiscovery;
+  private discovery: ImageDiscovery | null = null;
 
   private readonly overlay: OverlayManager;
 
@@ -114,9 +116,12 @@ export class TranslatorController {
 
   private readonly sharedTasks = new Map<string, SharedImageTask>();
 
+  private adapterStates: SiteAdapterState[] = [];
+
   constructor() {
     this.transport = new TransportClient();
     this.resultCache = new TranslationResultCache();
+    this.refreshAdapterState();
 
     this.queue = new TaskQueue({
       maxConcurrency: this.settings.maxConcurrency,
@@ -127,7 +132,7 @@ export class TranslatorController {
       }
     });
 
-    this.overlay = new OverlayManager(this.settings, {
+    this.overlay = new OverlayManager(this.settings, this.adapterStates, {
       onTranslateNow: () => this.translateCurrentPage(),
       onLauncherPositionChange: (position) => this.persistLauncherPosition(position),
       onToggleSession: () => this.toggleSession(),
@@ -142,13 +147,10 @@ export class TranslatorController {
       onIgnoreImage: (id) => this.ignoreImage(id)
     });
 
-    this.discovery = new ImageDiscovery({
-      onImageEligible: (image) => this.handleDiscoveredImage(image)
-    });
-    this.discovery.start();
+    this.rebuildDiscovery();
 
     if (this.enabled) {
-      this.discovery.rescan();
+      this.discovery?.rescan();
     }
 
     this.renderChrome();
@@ -205,8 +207,8 @@ export class TranslatorController {
     this.enabled = !this.enabled;
     if (this.enabled) {
       this.queue.resume();
-      this.discovery.reset();
-      this.discovery.rescan();
+      this.discovery?.reset();
+      this.discovery?.rescan();
       this.overlay.toast("已启动本页自动翻译。", "neutral");
     } else {
       this.queue.pause();
@@ -222,8 +224,8 @@ export class TranslatorController {
       this.queue.resume();
     }
 
-    this.discovery.reset();
-    this.discovery.rescan();
+    this.discovery?.reset();
+    this.discovery?.rescan();
     this.renderChrome();
     this.overlay.toast(wasEnabled ? "已重新扫描当前页图片。" : "已启动本页自动翻译。", "neutral");
   }
@@ -242,15 +244,12 @@ export class TranslatorController {
     this.overlay.updateSettings(this.settings);
   }
 
-  private handleDiscoveredImage(image: HTMLImageElement): void {
+  private handleDiscoveredImage(candidate: DiscoveredImageCandidate): void {
     if (!this.enabled) {
       return;
     }
 
-    const sourceUrl = getImageSource(image);
-    if (!sourceUrl) {
-      return;
-    }
+    const { image, sourceUrl } = candidate;
 
     const signature = buildImageSignature(sourceUrl, this.settings);
     const existingId = this.imageIds.get(image);
@@ -460,13 +459,16 @@ export class TranslatorController {
 
   private applySettings(nextSettings: UserscriptSettings): void {
     this.settings = saveSettings(nextSettings);
+    this.refreshAdapterState();
     this.overlay.updateSettings(this.settings);
+    this.overlay.updateAdapterStates(this.adapterStates);
     this.resetRuntimeState();
+    this.rebuildDiscovery();
     this.queue.setMaxConcurrency(this.settings.maxConcurrency);
     this.enabled = this.settings.autoTranslateEnabled;
     if (this.enabled) {
       this.queue.resume();
-      this.discovery.rescan();
+      this.discovery?.rescan();
     } else {
       this.queue.pause();
     }
@@ -485,8 +487,21 @@ export class TranslatorController {
     this.imageEntries.clear();
     this.sharedTasks.clear();
     this.imageIds = new WeakMap<HTMLImageElement, string>();
-    this.discovery.reset();
+    this.discovery?.reset();
     this.renderImages();
+  }
+
+  private refreshAdapterState(): void {
+    this.adapterStates = resolveSiteAdapterStates(window.location, this.settings.adapterOverrides);
+  }
+
+  private rebuildDiscovery(): void {
+    this.discovery?.stop();
+    this.discovery = new ImageDiscovery({
+      adapters: resolveActiveSiteAdapters(window.location, this.settings.adapterOverrides),
+      onImageEligible: (candidate) => this.handleDiscoveredImage(candidate)
+    });
+    this.discovery.start();
   }
 
   private toggleImageOriginal(id: string): void {

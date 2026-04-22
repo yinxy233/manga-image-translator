@@ -8,12 +8,20 @@ describe("sanitizeSettings", () => {
     const settings = sanitizeSettings({
       uploadTransport: "base64-json",
       maxConcurrency: 3,
-      cacheEnabled: false
+      cacheEnabled: false,
+      adapterOverrides: {
+        generic: true,
+        mamekichimameko: false
+      }
     });
 
     expect(settings.uploadTransport).toBe("base64-json");
     expect(settings.maxConcurrency).toBe(3);
     expect(settings.cacheEnabled).toBe(false);
+    expect(settings.adapterOverrides).toEqual({
+      generic: true,
+      mamekichimameko: false
+    });
   });
 
   it("falls back to the default upload transport for invalid values", () => {
@@ -105,5 +113,21 @@ describe("sanitizeSettings", () => {
     const settings = sanitizeSettings({});
 
     expect(settings.cacheEnabled).toBe(DEFAULT_SETTINGS.cacheEnabled);
+    expect(settings.adapterOverrides).toEqual(DEFAULT_SETTINGS.adapterOverrides);
+  });
+
+  it("drops unknown adapter overrides and keeps registered adapter ids", () => {
+    const settings = sanitizeSettings({
+      adapterOverrides: {
+        generic: false,
+        mamekichimameko: true,
+        unknown: true
+      } as Record<string, boolean>
+    });
+
+    expect(settings.adapterOverrides).toEqual({
+      generic: false,
+      mamekichimameko: true
+    });
   });
 });

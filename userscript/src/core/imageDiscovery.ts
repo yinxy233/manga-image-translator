@@ -1,26 +1,25 @@
+import type { SiteAdapterDefinition } from "../adapters/types";
 import {
   MIN_NATURAL_HEIGHT,
   MIN_NATURAL_WIDTH,
   MIN_RENDER_HEIGHT,
   MIN_RENDER_WIDTH
 } from "../config";
+import { isRasterImageUrl } from "../utils/image";
+
+export interface DiscoveredImageCandidate {
+  image: HTMLImageElement;
+  sourceUrl: string;
+  adapterId: string;
+}
 
 export interface ImageDiscoveryOptions {
-  onImageEligible: (image: HTMLImageElement) => void;
+  adapters: ReadonlyArray<SiteAdapterDefinition>;
+  onImageEligible: (candidate: DiscoveredImageCandidate) => void;
 }
 
-function isSourceRasterImage(imageUrl: string): boolean {
-  const normalized = imageUrl.toLowerCase();
-  return !normalized.endsWith(".svg") && !normalized.startsWith("data:image/svg");
-}
-
-export function getImageSource(image: HTMLImageElement): string | null {
-  return image.currentSrc || image.src || null;
-}
-
-export function isEligibleRasterImage(image: HTMLImageElement): boolean {
-  const source = getImageSource(image);
-  if (!source || !isSourceRasterImage(source)) {
+export function isEligibleRasterImage(image: HTMLImageElement, sourceUrl: string): boolean {
+  if (!isRasterImageUrl(sourceUrl)) {
     return false;
   }
 
@@ -55,6 +54,8 @@ export function isEligibleRasterImage(image: HTMLImageElement): boolean {
 }
 
 export class ImageDiscovery {
+  private readonly adapters: ReadonlyArray<SiteAdapterDefinition>;
+
   private readonly observedImages = new WeakSet<HTMLImageElement>();
 
   private processedSources = new WeakMap<HTMLImageElement, string>();
@@ -63,9 +64,12 @@ export class ImageDiscovery {
 
   private readonly mutationObserver: MutationObserver;
 
-  private readonly onImageEligible: (image: HTMLImageElement) => void;
+  private readonly onImageEligible: (candidate: DiscoveredImageCandidate) => void;
+
+  private adapterRoots = new Map<string, Element[]>();
 
   constructor(options: ImageDiscoveryOptions) {
+    this.adapters = options.adapters;
     this.onImageEligible = options.onImageEligible;
 
     this.intersectionObserver = new IntersectionObserver(
@@ -76,17 +80,31 @@ export class ImageDiscovery {
             continue;
           }
 
-          const source = getImageSource(image);
-          if (!source || this.processedSources.get(image) === source) {
+          const adapter = this.resolveAdapterForImage(image);
+          if (!adapter) {
             continue;
           }
 
-          if (!isEligibleRasterImage(image)) {
+          const sourceUrl = adapter.resolveImageSource(image);
+          if (!sourceUrl) {
             continue;
           }
 
-          this.processedSources.set(image, source);
-          this.onImageEligible(image);
+          const processedKey = `${adapter.id}|${sourceUrl}`;
+          if (this.processedSources.get(image) === processedKey) {
+            continue;
+          }
+
+          if (!isEligibleRasterImage(image, sourceUrl)) {
+            continue;
+          }
+
+          this.processedSources.set(image, processedKey);
+          this.onImageEligible({
+            image,
+            sourceUrl,
+            adapterId: adapter.id
+          });
         }
       },
       {
@@ -95,10 +113,16 @@ export class ImageDiscovery {
     );
 
     this.mutationObserver = new MutationObserver((records) => {
+      this.refreshAdapterRoots();
+
       for (const record of records) {
         if (record.type === "attributes" && record.target instanceof HTMLImageElement) {
-          this.intersectionObserver.observe(record.target);
+          this.maybeObserveImage(record.target);
           continue;
+        }
+
+        if (record.target instanceof Element && this.isAdapterRoot(record.target)) {
+          this.scanNode(record.target);
         }
 
         for (const node of record.addedNodes) {
@@ -109,7 +133,9 @@ export class ImageDiscovery {
   }
 
   start(): void {
-    this.scanNode(document.body);
+    this.refreshAdapterRoots();
+    this.scanActiveRoots();
+
     this.mutationObserver.observe(document.body, {
       subtree: true,
       childList: true,
@@ -123,12 +149,19 @@ export class ImageDiscovery {
   }
 
   rescan(): void {
-    this.scanNode(document.body);
+    this.refreshAdapterRoots();
+    this.scanActiveRoots();
   }
 
   stop(): void {
     this.intersectionObserver.disconnect();
     this.mutationObserver.disconnect();
+  }
+
+  private scanActiveRoots(): void {
+    for (const root of this.collectActiveRoots()) {
+      this.scanNode(root);
+    }
   }
 
   private scanNode(node: Node | null): void {
@@ -137,18 +170,22 @@ export class ImageDiscovery {
     }
 
     if (node instanceof HTMLImageElement) {
-      this.observeImage(node);
+      this.maybeObserveImage(node);
       return;
     }
 
     if (node instanceof Element) {
       for (const image of node.querySelectorAll("img")) {
-        this.observeImage(image);
+        this.maybeObserveImage(image);
       }
     }
   }
 
-  private observeImage(image: HTMLImageElement): void {
+  private maybeObserveImage(image: HTMLImageElement): void {
+    if (!this.resolveAdapterForImage(image)) {
+      return;
+    }
+
     if (this.observedImages.has(image)) {
       this.intersectionObserver.unobserve(image);
       this.intersectionObserver.observe(image);
@@ -162,5 +199,55 @@ export class ImageDiscovery {
       });
     }
     this.intersectionObserver.observe(image);
+  }
+
+  private resolveAdapterForImage(image: HTMLImageElement): SiteAdapterDefinition | null {
+    for (const adapter of this.adapters) {
+      if (!adapter.isImageCandidate(image)) {
+        continue;
+      }
+
+      const roots = this.adapterRoots.get(adapter.id) ?? [];
+      if (roots.some((root) => root === image || root.contains(image))) {
+        return adapter;
+      }
+    }
+
+    return null;
+  }
+
+  private refreshAdapterRoots(): void {
+    const nextRoots = new Map<string, Element[]>();
+
+    for (const adapter of this.adapters) {
+      const roots = new Set<Element>();
+      for (const selector of adapter.getRootSelectors()) {
+        for (const element of document.querySelectorAll(selector)) {
+          roots.add(element);
+        }
+      }
+      nextRoots.set(adapter.id, Array.from(roots));
+    }
+
+    this.adapterRoots = nextRoots;
+  }
+
+  private collectActiveRoots(): Element[] {
+    const roots = new Set<Element>();
+    for (const adapterRoots of this.adapterRoots.values()) {
+      for (const root of adapterRoots) {
+        roots.add(root);
+      }
+    }
+    return Array.from(roots);
+  }
+
+  private isAdapterRoot(element: Element): boolean {
+    for (const adapterRoots of this.adapterRoots.values()) {
+      if (adapterRoots.includes(element)) {
+        return true;
+      }
+    }
+    return false;
   }
 }

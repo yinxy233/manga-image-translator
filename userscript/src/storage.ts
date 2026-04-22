@@ -1,3 +1,4 @@
+import { sanitizeAdapterOverrides } from "./adapters";
 import {
   DEFAULT_SETTINGS,
   DETECTOR_OPTIONS,
@@ -39,6 +40,7 @@ export function sanitizeSettings(settings: Partial<UserscriptSettings>): Userscr
   const maxConcurrency = Number.isFinite(settings.maxConcurrency)
     ? Math.min(6, Math.max(1, Number(settings.maxConcurrency)))
     : DEFAULT_SETTINGS.maxConcurrency;
+  const adapterOverrides = sanitizeAdapterOverrides(settings.adapterOverrides);
   const uploadTransport =
     settings.uploadTransport === "base64-json" || settings.uploadTransport === "multipart"
       ? settings.uploadTransport
@@ -106,7 +108,8 @@ export function sanitizeSettings(settings: Partial<UserscriptSettings>): Userscr
     autoTranslateEnabled: Boolean(settings.autoTranslateEnabled ?? DEFAULT_SETTINGS.autoTranslateEnabled),
     cacheEnabled: Boolean(settings.cacheEnabled ?? DEFAULT_SETTINGS.cacheEnabled),
     maxConcurrency,
-    launcherPosition
+    launcherPosition,
+    adapterOverrides
   };
 }
 

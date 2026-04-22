@@ -1,3 +1,4 @@
+import { buildDefaultAdapterOverrides } from "./adapters";
 import type { TranslatorKey, UserscriptSettings } from "./types";
 
 export const DEFAULT_SETTINGS: UserscriptSettings = {
@@ -17,7 +18,8 @@ export const DEFAULT_SETTINGS: UserscriptSettings = {
   autoTranslateEnabled: false,
   cacheEnabled: true,
   maxConcurrency: 2,
-  launcherPosition: null
+  launcherPosition: null,
+  adapterOverrides: buildDefaultAdapterOverrides()
 };
 
 export const TRANSLATOR_OPTIONS: Array<{ value: TranslatorKey; label: string }> = [

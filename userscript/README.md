@@ -8,6 +8,7 @@ This directory contains a standalone Tampermonkey userscript project for connect
 
 - 手动启动当前页面翻译，之后自动追踪懒加载图片
 - 结果以覆盖层方式贴在原图上，不改站点原始 DOM 结构
+- 支持通用兜底 + 可扩展站点适配器，可按站点控制候选图片区范围
 - 支持远程 `serverBaseUrl + apiKey`
 - 优先使用浏览器 `fetch`，失败时自动回退到 `GM_xmlhttpRequest`
 - 支持本地持久化结果缓存，可在设置中关闭
@@ -110,6 +111,7 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - `autoTranslateEnabled`
 - `cacheEnabled`
 - `maxConcurrency`
+- `adapterOverrides`
 
 推荐起始配置：
 
@@ -128,6 +130,7 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - `uploadTransport`: `multipart`
 - `cacheEnabled`: `true`
 - `maxConcurrency`: `2`
+- `adapterOverrides`: 保持默认，按站点逐个开启或关闭
 
 这些参数会映射到服务端 `config`：
 
@@ -154,6 +157,7 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 3. 点击右下角 `启动本页`。
 4. 首屏图片会进入队列，后续懒加载图片会自动继续翻译。
 5. 通过悬浮控制坞或单图状态卡进行暂停、重试、忽略、原图切换。
+6. 如需站点特化规则，可在设置里的“站点适配器”分组手动启停。
 
 ## HTTPS / HTTP Compatibility
 
@@ -180,4 +184,9 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - 油猴脚本是独立工程，不复用 `front/` 运行时。
 - 当前版本只面向桌面 Tampermonkey，不覆盖移动端浏览器。
 - 会默认缓存已完成的翻译结果；如果站点图片经常变化或你不希望复用旧结果，可以在设置里关闭缓存。
-- 当前版本不做站点特化适配。
+- 当前版本支持 `generic` 通用兜底适配器和站点特化适配器，首个内置站点为 `mamekichimameko.blog.jp`。
+- 新增站点适配器时，最少需要：
+  - 在 `src/adapters/` 注册 `SiteAdapterDefinition`
+  - 声明正文 root selectors
+  - 按需覆盖 `resolveImageSource`
+  - 补充 registry / imageDiscovery / settings UI 测试

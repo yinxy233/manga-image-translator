@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_SETTINGS } from "../src/config";
-import { OverlayManager } from "../src/core/overlayManager";
+import { type SiteAdapterState } from "../src/adapters/types";
+import { type OverlayManagerCallbacks, OverlayManager } from "../src/core/overlayManager";
 
 function createTouchLikeEvent(
   type: string,
@@ -22,6 +23,47 @@ function createTouchLikeEvent(
   return event;
 }
 
+const TEST_ADAPTER_STATES: SiteAdapterState[] = [
+  {
+    id: "mamekichimameko",
+    label: "まめきちまめこ",
+    description: "文章正文容器内的漫画图与文末告知图。",
+    domainLabel: "mamekichimameko.blog.jp",
+    defaultEnabled: true,
+    enabled: true,
+    matched: true,
+    active: true
+  },
+  {
+    id: "generic",
+    label: "通用兜底",
+    description: "未知站点或未覆盖模板时，按全站可见图片规则兜底处理。",
+    domainLabel: "*://*/*",
+    defaultEnabled: true,
+    enabled: true,
+    matched: false,
+    active: false
+  }
+];
+
+function createOverlay(
+  callbackOverrides: Partial<OverlayManagerCallbacks> = {}
+): OverlayManager {
+  return new OverlayManager(DEFAULT_SETTINGS, TEST_ADAPTER_STATES, {
+    onTranslateNow: vi.fn(),
+    onLauncherPositionChange: vi.fn(),
+    onToggleSession: vi.fn(),
+    onToggleGlobalOriginal: vi.fn(),
+    onTestConnection: vi.fn(),
+    onSaveSettings: vi.fn(),
+    onToggleImageOriginal: vi.fn(),
+    onRetryImage: vi.fn(),
+    onCancelImage: vi.fn(),
+    onIgnoreImage: vi.fn(),
+    ...callbackOverrides
+  });
+}
+
 describe("OverlayManager", () => {
   it("syncs overlay position with image bounds and toggles compact details", () => {
     const image = document.createElement("img");
@@ -34,18 +76,7 @@ describe("OverlayManager", () => {
       }) as DOMRect;
     document.body.appendChild(image);
 
-    const overlay = new OverlayManager(DEFAULT_SETTINGS, {
-      onTranslateNow: vi.fn(),
-      onLauncherPositionChange: vi.fn(),
-      onToggleSession: vi.fn(),
-      onToggleGlobalOriginal: vi.fn(),
-      onTestConnection: vi.fn(),
-      onSaveSettings: vi.fn(),
-      onToggleImageOriginal: vi.fn(),
-      onRetryImage: vi.fn(),
-      onCancelImage: vi.fn(),
-      onIgnoreImage: vi.fn()
-    });
+    const overlay = createOverlay();
 
     overlay.renderImages([
       {
@@ -81,18 +112,7 @@ describe("OverlayManager", () => {
 
   it("starts collapsed and only opens the panel from settings", () => {
     const onTranslateNow = vi.fn();
-    const overlay = new OverlayManager(DEFAULT_SETTINGS, {
-      onTranslateNow,
-      onLauncherPositionChange: vi.fn(),
-      onToggleSession: vi.fn(),
-      onToggleGlobalOriginal: vi.fn(),
-      onTestConnection: vi.fn(),
-      onSaveSettings: vi.fn(),
-      onToggleImageOriginal: vi.fn(),
-      onRetryImage: vi.fn(),
-      onCancelImage: vi.fn(),
-      onIgnoreImage: vi.fn()
-    });
+    const overlay = createOverlay({ onTranslateNow });
 
     const dock = overlay.shadowRoot.querySelector(".mit-dock") as HTMLDivElement;
     const settingsPanel = overlay.shadowRoot.querySelector(".mit-settings") as HTMLDivElement;
@@ -104,6 +124,7 @@ describe("OverlayManager", () => {
     const settingsLauncher = overlay.shadowRoot.querySelector(
       '.mit-launcher-button[data-kind="settings"]'
     ) as HTMLButtonElement;
+    const settingsButton = overlay.shadowRoot.querySelector(".mit-settings-btn") as HTMLButtonElement;
 
     expect(dock.dataset.collapsed).toBe("true");
     expect(launcherGroup.dataset.open).toBe("false");
@@ -117,32 +138,27 @@ describe("OverlayManager", () => {
 
     settingsLauncher.click();
     expect(dock.dataset.collapsed).toBe("false");
+    expect(settingsPanel.dataset.open).toBe("false");
+    expect(settingsFooter.dataset.visible).toBe("false");
+    expect(launcherGroup.dataset.open).toBe("true");
+
+    settingsButton.click();
     expect(settingsPanel.dataset.open).toBe("true");
     expect(settingsFooter.dataset.visible).toBe("true");
-    expect(launcherGroup.dataset.open).toBe("true");
 
     overlay.destroy();
   });
 
   it("groups settings into collapsible sections and keeps save actions outside the scroll body", () => {
     const onSaveSettings = vi.fn();
-    const overlay = new OverlayManager(DEFAULT_SETTINGS, {
-      onTranslateNow: vi.fn(),
-      onLauncherPositionChange: vi.fn(),
-      onToggleSession: vi.fn(),
-      onToggleGlobalOriginal: vi.fn(),
-      onTestConnection: vi.fn(),
-      onSaveSettings,
-      onToggleImageOriginal: vi.fn(),
-      onRetryImage: vi.fn(),
-      onCancelImage: vi.fn(),
-      onIgnoreImage: vi.fn()
-    });
+    const overlay = createOverlay({ onSaveSettings });
 
     const settingsLauncher = overlay.shadowRoot.querySelector(
       '.mit-launcher-button[data-kind="settings"]'
     ) as HTMLButtonElement;
+    const settingsButton = overlay.shadowRoot.querySelector(".mit-settings-btn") as HTMLButtonElement;
     settingsLauncher.click();
+    settingsButton.click();
 
     const dock = overlay.shadowRoot.querySelector(".mit-dock") as HTMLDivElement;
     const dockBody = overlay.shadowRoot.querySelector(".mit-dock-body") as HTMLDivElement;
@@ -159,11 +175,13 @@ describe("OverlayManager", () => {
     const sections = overlay.shadowRoot.querySelectorAll(".mit-settings-section");
     const advancedSection = sections[3] as HTMLDivElement;
     const advancedToggle = advancedSection.querySelector(".mit-section-toggle") as HTMLButtonElement;
+    const adapterSection = sections[4] as HTMLDivElement;
+    const adapterToggle = adapterSection.querySelector(".mit-section-toggle") as HTMLButtonElement;
 
     expect(dock.contains(dockBody)).toBe(true);
     expect(dock.contains(settingsFooter)).toBe(true);
     expect(settingsPanel.contains(settingsFooter)).toBe(false);
-    expect(sectionLabels).toEqual(["连接", "翻译", "处理流程", "高级"]);
+    expect(sectionLabels).toEqual(["连接", "翻译", "处理流程", "高级", "站点适配器"]);
     expect(fieldLabels).toEqual(
       expect.arrayContaining([
         "服务地址",
@@ -188,10 +206,14 @@ describe("OverlayManager", () => {
     expect((sections[1] as HTMLDivElement).dataset.open).toBe("false");
     expect((sections[2] as HTMLDivElement).dataset.open).toBe("false");
     expect(advancedSection.dataset.open).toBe("false");
+    expect(adapterSection.dataset.open).toBe("false");
 
     advancedToggle.click();
     expect(advancedSection.dataset.open).toBe("true");
     expect(advancedToggle.getAttribute("aria-expanded")).toBe("true");
+    adapterToggle.click();
+    expect(adapterSection.dataset.open).toBe("true");
+    expect(adapterToggle.getAttribute("aria-expanded")).toBe("true");
 
     const serverInput = overlay.shadowRoot.querySelector('input[placeholder="https://translator.example.com"]') as HTMLInputElement;
     const apiKeyInput = overlay.shadowRoot.querySelector('input[placeholder="可选接口密钥"]') as HTMLInputElement;
@@ -201,6 +223,13 @@ describe("OverlayManager", () => {
     const concurrencyInput = overlay.shadowRoot.querySelector(
       'input[type="number"][min="1"][max="6"]'
     ) as HTMLInputElement;
+    const adapterCheckboxes = Array.from(
+      overlay.shadowRoot.querySelectorAll('.mit-adapter-toggle input[type="checkbox"]')
+    ) as HTMLInputElement[];
+    const adapterStatuses = Array.from(
+      overlay.shadowRoot.querySelectorAll(".mit-adapter-status"),
+      (node) => node.textContent
+    );
     const saveButton = settingsFooter.querySelector(".mit-btn") as HTMLButtonElement;
 
     expect(serverInput.autocomplete).toBe("off");
@@ -209,17 +238,23 @@ describe("OverlayManager", () => {
     expect(apiKeyInput.autocomplete).toBe("off");
     expect(apiKeyInput.getAttribute("data-lpignore")).toBe("true");
     expect(cacheCheckbox.checked).toBe(true);
+    expect(adapterStatuses).toEqual(["当前页生效", "已启用"]);
 
     serverInput.value = " https://translator.internal ";
     cacheCheckbox.checked = false;
     concurrencyInput.value = "4";
+    adapterCheckboxes[0]!.checked = false;
     saveButton.click();
 
     expect(onSaveSettings).toHaveBeenCalledWith(
       expect.objectContaining({
         serverBaseUrl: "https://translator.internal",
         cacheEnabled: false,
-        maxConcurrency: 4
+        maxConcurrency: 4,
+        adapterOverrides: {
+          mamekichimameko: false,
+          generic: true
+        }
       })
     );
 
@@ -228,18 +263,7 @@ describe("OverlayManager", () => {
 
   it("allows dragging the floating launcher and persists the new position", () => {
     const onLauncherPositionChange = vi.fn();
-    const overlay = new OverlayManager(DEFAULT_SETTINGS, {
-      onTranslateNow: vi.fn(),
-      onLauncherPositionChange,
-      onToggleSession: vi.fn(),
-      onToggleGlobalOriginal: vi.fn(),
-      onTestConnection: vi.fn(),
-      onSaveSettings: vi.fn(),
-      onToggleImageOriginal: vi.fn(),
-      onRetryImage: vi.fn(),
-      onCancelImage: vi.fn(),
-      onIgnoreImage: vi.fn()
-    });
+    const overlay = createOverlay({ onLauncherPositionChange });
 
     const launcherGroup = overlay.shadowRoot.querySelector(".mit-launcher-group") as HTMLDivElement;
     const translateLauncher = overlay.shadowRoot.querySelector(
@@ -293,18 +317,7 @@ describe("OverlayManager", () => {
 
   it("allows dragging the floating launcher with touch events", () => {
     const onLauncherPositionChange = vi.fn();
-    const overlay = new OverlayManager(DEFAULT_SETTINGS, {
-      onTranslateNow: vi.fn(),
-      onLauncherPositionChange,
-      onToggleSession: vi.fn(),
-      onToggleGlobalOriginal: vi.fn(),
-      onTestConnection: vi.fn(),
-      onSaveSettings: vi.fn(),
-      onToggleImageOriginal: vi.fn(),
-      onRetryImage: vi.fn(),
-      onCancelImage: vi.fn(),
-      onIgnoreImage: vi.fn()
-    });
+    const overlay = createOverlay({ onLauncherPositionChange });
 
     const launcherGroup = overlay.shadowRoot.querySelector(".mit-launcher-group") as HTMLDivElement;
     const settingsLauncher = overlay.shadowRoot.querySelector(

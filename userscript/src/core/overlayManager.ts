@@ -15,6 +15,7 @@ import {
   TRANSLATOR_OPTIONS,
   TRANSPORT_OPTIONS
 } from "../config";
+import type { SiteAdapterState } from "../adapters/types";
 import type {
   ConnectionState,
   LauncherPosition,
@@ -71,6 +72,29 @@ interface SettingsSectionOptions {
   title: string;
   content: HTMLElement;
   open?: boolean;
+}
+
+function deriveAdapterStatus(adapterState: SiteAdapterState): string {
+  if (adapterState.active) {
+    return "当前页生效";
+  }
+  if (adapterState.matched && !adapterState.enabled) {
+    return "当前页已匹配，已关闭";
+  }
+  if (adapterState.matched) {
+    return "当前页命中";
+  }
+  return adapterState.enabled ? "已启用" : "已关闭";
+}
+
+function deriveAdapterTone(adapterState: SiteAdapterState): "active" | "matched" | "disabled" | "idle" {
+  if (adapterState.active) {
+    return "active";
+  }
+  if (adapterState.matched) {
+    return adapterState.enabled ? "matched" : "disabled";
+  }
+  return adapterState.enabled ? "idle" : "disabled";
 }
 
 const STYLE_TEXT = `
@@ -758,6 +782,98 @@ const STYLE_TEXT = `
     height: 18px;
   }
 
+  .mit-adapter-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .mit-adapter-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    border-radius: 10px;
+    background: #ffffff;
+    border: 1px solid #d1d5db;
+  }
+
+  .mit-adapter-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .mit-adapter-copy {
+    min-width: 0;
+  }
+
+  .mit-adapter-title {
+    display: block;
+    font-size: 13px;
+    font-weight: 800;
+    color: #111827;
+  }
+
+  .mit-adapter-meta {
+    margin: 4px 0 0;
+    font-size: 11px;
+    line-height: 1.45;
+    color: #6b7280;
+  }
+
+  .mit-adapter-status {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 24px;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: #f3f4f6;
+    color: #1f2937;
+    border: 1px solid #e5e7eb;
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
+  .mit-adapter-status[data-tone="active"] {
+    background: #ecfdf5;
+    color: #166534;
+    border-color: #bbf7d0;
+  }
+
+  .mit-adapter-status[data-tone="matched"] {
+    background: #eff6ff;
+    color: #1d4ed8;
+    border-color: #bfdbfe;
+  }
+
+  .mit-adapter-status[data-tone="disabled"] {
+    background: #fef2f2;
+    color: #b91c1c;
+    border-color: #fecaca;
+  }
+
+  .mit-adapter-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 38px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    color: #111827;
+  }
+
+  .mit-adapter-toggle input {
+    width: 18px;
+    height: 18px;
+  }
+
   .mit-settings-actions {
     display: flex;
     gap: 10px;
@@ -1012,6 +1128,18 @@ export class OverlayManager {
 
   private readonly concurrencyInput: HTMLInputElement;
 
+  private readonly adapterList: HTMLDivElement;
+
+  private readonly adapterRows = new Map<
+    string,
+    {
+      container: HTMLDivElement;
+      checkbox: HTMLInputElement;
+      status: HTMLSpanElement;
+      meta: HTMLParagraphElement;
+    }
+  >();
+
   private readonly itemRefs = new Map<string, OverlayItemRefs>();
 
   private viewModels = new Map<string, OverlayViewModel>();
@@ -1028,7 +1156,11 @@ export class OverlayManager {
 
   private suppressLauncherClick = false;
 
-  constructor(settings: UserscriptSettings, callbacks: OverlayManagerCallbacks) {
+  constructor(
+    settings: UserscriptSettings,
+    adapterStates: ReadonlyArray<SiteAdapterState>,
+    callbacks: OverlayManagerCallbacks
+  ) {
     this.callbacks = callbacks;
 
     this.host = document.createElement("div");
@@ -1093,8 +1225,9 @@ export class OverlayManager {
     this.autoCheckbox = document.createElement("input");
     this.cacheCheckbox = document.createElement("input");
     this.concurrencyInput = document.createElement("input");
+    this.adapterList = document.createElement("div");
 
-    this.settingsPanel = this.buildSettingsPanel(settings);
+    this.settingsPanel = this.buildSettingsPanel(settings, adapterStates);
     this.settingsFooter = this.buildSettingsFooter();
     this.dock.append(...this.buildDockContent());
 
@@ -1107,6 +1240,7 @@ export class OverlayManager {
     this.bindControls();
     this.syncDockVisibility();
     this.updateSettings(settings);
+    this.updateAdapterStates(adapterStates);
   }
 
   updateChrome(state: OverlayManagerState): void {
@@ -1149,6 +1283,26 @@ export class OverlayManager {
     this.concurrencyInput.value = String(settings.maxConcurrency);
     this.launcherPosition = settings.launcherPosition;
     this.syncLauncherPosition();
+  }
+
+  updateAdapterStates(adapterStates: ReadonlyArray<SiteAdapterState>): void {
+    const nextIds = new Set(adapterStates.map((adapterState) => adapterState.id));
+
+    for (const [id, row] of this.adapterRows.entries()) {
+      if (nextIds.has(id)) {
+        continue;
+      }
+      row.container.remove();
+      this.adapterRows.delete(id);
+    }
+
+    for (const adapterState of adapterStates) {
+      const row = this.adapterRows.get(adapterState.id) ?? this.createAdapterRow(adapterState);
+      row.checkbox.checked = adapterState.enabled;
+      row.status.dataset.tone = deriveAdapterTone(adapterState);
+      row.status.textContent = deriveAdapterStatus(adapterState);
+      row.meta.textContent = `${adapterState.domainLabel} · ${adapterState.description}`;
+    }
   }
 
   renderImages(viewModels: OverlayViewModel[]): void {
@@ -1270,7 +1424,7 @@ export class OverlayManager {
     this.launcherGroup.addEventListener("click", this.handleLauncherClickCapture, true);
     this.translateLauncher.addEventListener("click", () => this.callbacks.onTranslateNow());
     this.settingsLauncher.addEventListener("click", () => {
-      this.setSettingsOpen(true);
+      this.setSettingsOpen(false);
       this.collapsed = false;
       this.syncDockVisibility();
     });
@@ -1368,7 +1522,10 @@ export class OverlayManager {
     return container;
   }
 
-  private buildSettingsPanel(settings: UserscriptSettings): HTMLDivElement {
+  private buildSettingsPanel(
+    settings: UserscriptSettings,
+    adapterStates: ReadonlyArray<SiteAdapterState>
+  ): HTMLDivElement {
     const panel = document.createElement("div");
     panel.className = "mit-settings";
     panel.dataset.open = "false";
@@ -1517,6 +1674,9 @@ export class OverlayManager {
       this.createField("并发上限", this.concurrencyInput)
     );
 
+    this.adapterList.className = "mit-adapter-list";
+    this.updateAdapterStates(adapterStates);
+
     panel.append(
       this.createSettingsSection({
         title: "连接",
@@ -1533,6 +1693,10 @@ export class OverlayManager {
       this.createSettingsSection({
         title: "高级",
         content: advancedGrid
+      }),
+      this.createSettingsSection({
+        title: "站点适配器",
+        content: this.adapterList
       })
     );
 
@@ -1570,7 +1734,10 @@ export class OverlayManager {
       autoTranslateEnabled: this.autoCheckbox.checked,
       cacheEnabled: this.cacheCheckbox.checked,
       maxConcurrency: Number(this.concurrencyInput.value),
-      launcherPosition: this.launcherPosition
+      launcherPosition: this.launcherPosition,
+      adapterOverrides: Object.fromEntries(
+        Array.from(this.adapterRows.entries(), ([id, row]) => [id, row.checkbox.checked])
+      )
     });
   }
 
@@ -1644,6 +1811,54 @@ export class OverlayManager {
 
     section.append(toggle, body);
     return section;
+  }
+
+  private createAdapterRow(adapterState: SiteAdapterState): {
+    container: HTMLDivElement;
+    checkbox: HTMLInputElement;
+    status: HTMLSpanElement;
+    meta: HTMLParagraphElement;
+  } {
+    const container = document.createElement("div");
+    container.className = "mit-adapter-card";
+
+    const head = document.createElement("div");
+    head.className = "mit-adapter-head";
+
+    const copy = document.createElement("div");
+    copy.className = "mit-adapter-copy";
+
+    const title = document.createElement("span");
+    title.className = "mit-adapter-title";
+    title.textContent = adapterState.label;
+
+    const meta = document.createElement("p");
+    meta.className = "mit-adapter-meta";
+
+    copy.append(title, meta);
+
+    const status = document.createElement("span");
+    status.className = "mit-adapter-status";
+
+    head.append(copy, status);
+
+    const toggle = document.createElement("label");
+    toggle.className = "mit-adapter-toggle";
+
+    const caption = document.createElement("span");
+    caption.textContent = "启用当前适配器";
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.name = `mit-adapter-${adapterState.id}`;
+
+    toggle.append(caption, checkbox);
+    container.append(head, toggle);
+    this.adapterList.append(container);
+
+    const row = { container, checkbox, status, meta };
+    this.adapterRows.set(adapterState.id, row);
+    return row;
   }
 
   private createOverlayItem(id: string): OverlayItemRefs {

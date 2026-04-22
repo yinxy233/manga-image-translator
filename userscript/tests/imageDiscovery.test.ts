@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
+import type { SiteAdapterDefinition } from "../src/adapters/types";
 import { ImageDiscovery } from "../src/core/imageDiscovery";
+import { resolveDefaultImageSource } from "../src/utils/image";
 
 class FakeIntersectionObserver {
   static instance: FakeIntersectionObserver | null = null;
@@ -33,9 +35,11 @@ class FakeIntersectionObserver {
 }
 
 describe("ImageDiscovery", () => {
-  it("ignores small images and emits visible manga pages", () => {
+  it("only emits images inside active adapter roots", () => {
     vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
     const eligible = vi.fn();
+    const root = document.createElement("div");
+    root.id = "reader";
 
     const largeImage = document.createElement("img");
     Object.defineProperty(largeImage, "complete", { value: true });
@@ -59,15 +63,63 @@ describe("ImageDiscovery", () => {
         height: 40
       }) as DOMRect;
 
-    document.body.append(largeImage, smallImage);
+    root.append(largeImage);
+    document.body.append(root, smallImage);
 
-    const discovery = new ImageDiscovery({ onImageEligible: eligible });
+    const discovery = new ImageDiscovery({
+      adapters: [createAdapter({ id: "reader", label: "Reader", getRootSelectors: () => ["#reader"] })],
+      onImageEligible: eligible
+    });
     discovery.start();
     FakeIntersectionObserver.instance?.trigger(largeImage);
     FakeIntersectionObserver.instance?.trigger(smallImage);
 
     expect(eligible).toHaveBeenCalledTimes(1);
-    expect(eligible).toHaveBeenCalledWith(largeImage);
+    expect(eligible).toHaveBeenCalledWith({
+      image: largeImage,
+      sourceUrl: "https://example.com/page-1.jpg",
+      adapterId: "reader"
+    });
+    discovery.stop();
+  });
+
+  it("prefers the first matching adapter when roots overlap", () => {
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+    const eligible = vi.fn();
+    const root = document.createElement("div");
+    root.id = "reader";
+
+    const image = document.createElement("img");
+    Object.defineProperty(image, "complete", { value: true });
+    Object.defineProperty(image, "naturalWidth", { value: 1600 });
+    Object.defineProperty(image, "naturalHeight", { value: 2400 });
+    Object.defineProperty(image, "currentSrc", { value: "https://example.com/page-1.jpg" });
+    image.getBoundingClientRect = () =>
+      ({
+        width: 600,
+        height: 900
+      }) as DOMRect;
+
+    root.append(image);
+    document.body.append(root);
+
+    const discovery = new ImageDiscovery({
+      adapters: [
+        createAdapter({ id: "reader", label: "Reader", getRootSelectors: () => ["#reader"] }),
+        createAdapter({ id: "generic", label: "Generic", getRootSelectors: () => ["body"] })
+      ],
+      onImageEligible: eligible
+    });
+    discovery.start();
+    FakeIntersectionObserver.instance?.trigger(image);
+
+    expect(eligible).toHaveBeenCalledTimes(1);
+    expect(eligible).toHaveBeenCalledWith({
+      image,
+      sourceUrl: "https://example.com/page-1.jpg",
+      adapterId: "reader"
+    });
+    discovery.stop();
   });
 
   it("re-observes known images after reset and rescan", () => {
@@ -87,7 +139,10 @@ describe("ImageDiscovery", () => {
 
     document.body.append(image);
 
-    const discovery = new ImageDiscovery({ onImageEligible: eligible });
+    const discovery = new ImageDiscovery({
+      adapters: [createAdapter({ id: "reader", label: "Reader", getRootSelectors: () => ["body"] })],
+      onImageEligible: eligible
+    });
     discovery.start();
     FakeIntersectionObserver.instance?.trigger(image);
 
@@ -100,5 +155,21 @@ describe("ImageDiscovery", () => {
 
     expect(FakeIntersectionObserver.instance?.unobserve).toHaveBeenCalledWith(image);
     expect(FakeIntersectionObserver.instance?.observe).toHaveBeenCalledWith(image);
+    discovery.stop();
   });
 });
+
+function createAdapter(
+  overrides: Partial<SiteAdapterDefinition> & Pick<SiteAdapterDefinition, "id" | "label">
+): SiteAdapterDefinition {
+  return {
+    description: "test adapter",
+    domainLabel: "example.com",
+    defaultEnabled: true,
+    matches: () => true,
+    getRootSelectors: () => ["body"],
+    isImageCandidate: () => true,
+    resolveImageSource: resolveDefaultImageSource,
+    ...overrides
+  };
+}
