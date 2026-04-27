@@ -7,8 +7,7 @@ This directory contains a standalone Tampermonkey userscript project for connect
 ## Features
 
 - 手动启动当前页面翻译，之后自动追踪懒加载图片
-- 当前视口优先翻译，滚动停顿后会智能预翻接下来几张，减少逐张等待
-- 结果以覆盖层方式贴在原图上，不改站点原始 DOM 结构
+- 译图直接替换原图，同时保留图片角上的状态卡与原图切换
 - 支持通用兜底 + 可扩展站点适配器，可按站点控制候选图片区范围
 - 支持远程 `serverBaseUrl + apiKey`
 - 优先使用浏览器 `fetch`，失败时自动回退到 `GM_xmlhttpRequest`
@@ -109,7 +108,6 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - `inpaintingSize`
 - `maskDilationOffset`
 - `uploadTransport`
-- `sourceTransferMode`
 - `autoTranslateEnabled`
 - `cacheEnabled`
 - `maxConcurrency`
@@ -130,7 +128,6 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - `inpaintingSize`: `2048`
 - `maskDilationOffset`: `30`
 - `uploadTransport`: `multipart`
-- `sourceTransferMode`: `auto`
 - `cacheEnabled`: `true`
 - `maxConcurrency`: `2`
 - `adapterOverrides`: 保持默认，按站点逐个开启或关闭
@@ -153,13 +150,6 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - userscript 的 `maxConcurrency` 大于 `1`
 - 服务端通过 `--instances N` 启动了至少 `N` 个内部翻译 worker
 
-从当前版本开始，脚本会优先读取 `/health` 里的能力声明：
-
-- 如果服务端声明 `capabilities.source_url_translation=true`，且 `sourceTransferMode=auto`，脚本会优先把源图 URL 直接交给服务端抓取。
-- 如果 URL 直传失败，脚本会自动回退到当前浏览器下载原图再上传的 Blob 模式。
-- 如果服务端声明 `capabilities.web_result_fastpath=true`，脚本会优先走 Web 快速结果通道，并在 `final_ready` 到达后尽快拉取最终结果图。
-- 如果 `/health` 返回 `total_instances`，脚本会把实际并发自动限制到 `min(maxConcurrency, total_instances)`，避免前端并发高于服务端可用实例数。
-
 ## Usage
 
 1. 在 Tampermonkey 中安装构建产物。
@@ -174,7 +164,6 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - 如果页面是 `https://`，而你的翻译服务是 `http://`，普通浏览器 `fetch` 可能被 mixed content 策略阻止。
 - 脚本会优先尝试 `fetch`，失败后自动回退到 Tampermonkey 的 `GM_xmlhttpRequest`。
 - 在 iOS Safari + Stay 这类不支持 `GM_xmlhttpRequest` 流式响应的环境里，脚本会进一步退回到非流式图片接口。这样通常还能拿到最终结果，但不会显示完整的逐步进度。
-- `sourceTransferMode=auto` 时，只有公开可抓取的 `http(s)` 图片才会优先尝试服务端 URL 直传；需要站点登录态或 Cookie 的图片会依赖 Blob 上传回退。
 - 即便如此，公网部署仍然强烈建议使用 HTTPS 反向代理，例如 Nginx、Caddy 或 Cloudflare Tunnel。
 
 ## Troubleshooting

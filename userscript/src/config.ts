@@ -1,5 +1,5 @@
 import { buildDefaultAdapterOverrides } from "./adapters";
-import type { SourceTransferMode, TranslatorKey, UserscriptSettings } from "./types";
+import type { TranslatorKey, UserscriptSettings } from "./types";
 
 export const DEFAULT_SETTINGS: UserscriptSettings = {
   serverBaseUrl: "http://127.0.0.1:8000",
@@ -15,7 +15,6 @@ export const DEFAULT_SETTINGS: UserscriptSettings = {
   inpaintingSize: 2048,
   maskDilationOffset: 30,
   uploadTransport: "multipart",
-  sourceTransferMode: "auto",
   autoTranslateEnabled: false,
   cacheEnabled: true,
   maxConcurrency: 2,
@@ -150,25 +149,11 @@ export const TRANSPORT_OPTIONS: Array<{
   { value: "base64-json", label: "Base64（JSON）" }
 ];
 
-export const SOURCE_TRANSFER_MODE_OPTIONS: Array<{
-  value: SourceTransferMode;
-  label: string;
-}> = [
-  { value: "auto", label: "自动" },
-  { value: "blob-upload", label: "浏览器上传 Blob" },
-  { value: "remote-url", label: "服务端直拉 URL" }
-];
-
 export const MIN_RENDER_WIDTH = 220;
 export const MIN_RENDER_HEIGHT = 220;
 export const MIN_NATURAL_WIDTH = 300;
 export const MIN_NATURAL_HEIGHT = 300;
-export const PREFETCH_DISCOVERY_ROOT_MARGIN_PX = 2400;
-export const PREFETCH_SCROLL_IDLE_MS = 400;
-export const PREFETCH_HOT_AHEAD_VIEWPORTS = 2.5;
-export const PREFETCH_HOT_BEHIND_VIEWPORTS = 0.75;
-export const PREFETCH_WARM_AHEAD_VIEWPORTS = 5;
-export const PREFETCH_MAX_QUEUE_AHEAD = 4;
+export const INITIAL_AUTO_TRANSLATE_SCAN_DELAY_MS = 1200;
 export const MAX_BADGE_TEXT = 32;
 export const MIN_DETECTION_SIZE = 320;
 export const MAX_DETECTION_SIZE = 4096;

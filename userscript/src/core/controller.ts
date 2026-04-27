@@ -1,18 +1,10 @@
 import { resolveActiveSiteAdapters, resolveSiteAdapterStates } from "../adapters";
 import type { SiteAdapterDefinition, SiteAdapterState } from "../adapters/types";
-import {
-  PREFETCH_HOT_AHEAD_VIEWPORTS,
-  PREFETCH_HOT_BEHIND_VIEWPORTS,
-  PREFETCH_MAX_QUEUE_AHEAD,
-  PREFETCH_SCROLL_IDLE_MS,
-  PREFETCH_WARM_AHEAD_VIEWPORTS,
-  PROGRESS_TEXT_MAP
-} from "../config";
+import { INITIAL_AUTO_TRANSLATE_SCAN_DELAY_MS, PROGRESS_TEXT_MAP } from "../config";
 import { TranslationResultCache } from "../cache";
 import { loadSettings, saveSettings } from "../storage";
 import type {
   ConnectionState,
-  HealthPayload,
   LauncherPosition,
   OverlayViewModel,
   QueueStats,
@@ -23,6 +15,13 @@ import type {
 import { buildImageSignature } from "../utils/signature";
 import { HttpStatusError, TransportClient } from "../utils/transport";
 import { type DiscoveredImageCandidate, ImageDiscovery } from "./imageDiscovery";
+import {
+  createImagePresentationState,
+  refreshImagePresentationState,
+  releaseImagePresentation,
+  syncImagePresentation,
+  type ImagePresentationState
+} from "./imagePresentation";
 import { OverlayManager } from "./overlayManager";
 import { type CancelReason, TaskQueue } from "./taskQueue";
 
@@ -37,28 +36,16 @@ interface SharedImageTask {
   queuePosition: string | null;
   activeTask: boolean;
   servedFromCache: boolean;
-  resultFolder: string | null;
-  finalResultFetched: boolean;
-  finalFetchInFlight: Promise<void> | null;
 }
 
 interface ImageEntry {
   id: string;
   image: HTMLImageElement;
   shared: SharedImageTask;
+  presentation: ImagePresentationState;
   showOriginal: boolean;
   ignored: boolean;
   canceled: boolean;
-}
-
-type ScrollDirection = "up" | "down";
-
-type PrefetchZone = "visible" | "ahead" | "behind" | "warm" | "cold";
-
-interface PrefetchCandidate {
-  shared: SharedImageTask;
-  priority: number;
-  zone: PrefetchZone;
 }
 
 function createConnectionState(
@@ -76,6 +63,10 @@ function createQueueStats(): QueueStats {
     errors: 0,
     ignored: 0
   };
+}
+
+function isRenderableEvent(event: TranslationEvent): boolean {
+  return !event.text.startsWith("rendering_folder:") && !event.text.startsWith("final_ready:");
 }
 
 function deriveProgressMessage(event: TranslationEvent): string {
@@ -117,6 +108,8 @@ export class TranslatorController {
 
   private enabled = this.settings.autoTranslateEnabled;
 
+  private discoveryReady = !this.enabled;
+
   private globalShowOriginal = false;
 
   private connection = createConnectionState("尚未连接服务器");
@@ -137,27 +130,9 @@ export class TranslatorController {
 
   private adapterDomTweaksCleanup: (() => void) | null = null;
 
-  private scrollDirection: ScrollDirection = "down";
+  private waitingForInitialAutoScanLoad = false;
 
-  private lastScrollY = window.scrollY;
-
-  private scrollIdleTimer: number | null = null;
-
-  private readonly handleWindowScroll = (): void => {
-    const nextScrollY = window.scrollY;
-    if (nextScrollY !== this.lastScrollY) {
-      this.scrollDirection = nextScrollY > this.lastScrollY ? "down" : "up";
-      this.lastScrollY = nextScrollY;
-    }
-
-    this.syncPrefetchWindow(false);
-    this.scheduleScrollIdlePrefetch();
-  };
-
-  private readonly handleViewportResize = (): void => {
-    this.syncPrefetchWindow(false);
-    this.scheduleScrollIdlePrefetch();
-  };
+  private initialAutoScanTimer: number | null = null;
 
   constructor() {
     this.transport = new TransportClient();
@@ -165,7 +140,7 @@ export class TranslatorController {
     this.refreshAdapterState();
 
     this.queue = new TaskQueue({
-      maxConcurrency: this.getEffectiveMaxConcurrency(),
+      maxConcurrency: this.settings.maxConcurrency,
       paused: !this.enabled,
       onStatsChange: (stats) => {
         this.queueStats = stats;
@@ -181,6 +156,9 @@ export class TranslatorController {
       onTestConnection: () => {
         void this.testConnection();
       },
+      onClearCache: () => {
+        void this.clearCache();
+      },
       onSaveSettings: (settings) => this.applySettings(settings),
       onToggleImageOriginal: (id) => this.toggleImageOriginal(id),
       onRetryImage: (id) => this.retryImage(id),
@@ -189,17 +167,12 @@ export class TranslatorController {
     });
 
     this.rebuildDiscovery();
-    window.addEventListener("scroll", this.handleWindowScroll, { passive: true });
-    window.addEventListener("resize", this.handleViewportResize, { passive: true });
 
     if (this.enabled) {
-      this.discovery?.rescan();
-      this.syncPrefetchWindow(false);
-      this.scheduleScrollIdlePrefetch();
+      this.scheduleInitialAutoTranslateScan();
     }
 
     this.renderChrome();
-    void this.refreshServerHealth(true);
   }
 
   private renderChrome(): void {
@@ -232,13 +205,20 @@ export class TranslatorController {
         message = "已取消此图片";
       }
 
+      const showOriginal = this.globalShowOriginal || entry.showOriginal;
+      syncImagePresentation(entry.image, entry.presentation, {
+        sourceUrl: entry.shared.sourceUrl,
+        resultUrl: entry.shared.resultUrl,
+        showOriginal
+      });
+
       models.push({
         id: entry.id,
         image: entry.image,
         status,
         message,
         resultUrl: entry.shared.resultUrl,
-        showOriginal: this.globalShowOriginal || entry.showOriginal,
+        showOriginal,
         queuePosition: entry.ignored || entry.canceled ? null : entry.shared.queuePosition,
         canRetry: status === "error" || status === "canceled" || status === "ignored",
         canCancel: !entry.ignored && !entry.canceled && entry.shared.activeTask,
@@ -252,15 +232,16 @@ export class TranslatorController {
   private toggleSession(): void {
     this.enabled = !this.enabled;
     if (this.enabled) {
+      this.discoveryReady = true;
+      this.clearInitialAutoTranslateScan();
       this.queue.resume();
       this.discovery?.reset();
       this.discovery?.rescan();
-      this.syncPrefetchWindow(false);
-      this.scheduleScrollIdlePrefetch();
       this.overlay.toast("已启动本页自动翻译。", "neutral");
     } else {
+      this.discoveryReady = false;
+      this.clearInitialAutoTranslateScan();
       this.queue.pause();
-      this.clearScrollIdlePrefetch();
       this.overlay.toast("已暂停新任务排队。正在处理的任务会继续完成。", "neutral");
     }
     this.renderChrome();
@@ -273,10 +254,10 @@ export class TranslatorController {
       this.queue.resume();
     }
 
+    this.discoveryReady = true;
+    this.clearInitialAutoTranslateScan();
     this.discovery?.reset();
     this.discovery?.rescan();
-    this.syncPrefetchWindow(false);
-    this.scheduleScrollIdlePrefetch();
     this.renderChrome();
     this.overlay.toast(wasEnabled ? "已重新扫描当前页图片。" : "已启动本页自动翻译。", "neutral");
   }
@@ -296,7 +277,7 @@ export class TranslatorController {
   }
 
   private handleDiscoveredImage(candidate: DiscoveredImageCandidate): void {
-    if (!this.enabled) {
+    if (!this.enabled || !this.discoveryReady) {
       return;
     }
 
@@ -307,11 +288,14 @@ export class TranslatorController {
     if (existingId) {
       const existingEntry = this.imageEntries.get(existingId);
       if (existingEntry?.shared.signature === signature) {
+        refreshImagePresentationState(existingEntry.image, existingEntry.presentation, sourceUrl);
         return;
       }
       if (existingEntry) {
         existingEntry.shared.imageIds.delete(existingId);
+        releaseImagePresentation(existingEntry.image, existingEntry.presentation);
         this.imageEntries.delete(existingId);
+        this.cancelSharedTaskIfUnused(existingEntry.shared, "canceled");
       }
     }
 
@@ -330,10 +314,7 @@ export class TranslatorController {
         message: "等待加入队列",
         queuePosition: null,
         activeTask: false,
-        servedFromCache: false,
-        resultFolder: null,
-        finalResultFetched: false,
-        finalFetchInFlight: null
+        servedFromCache: false
       };
       this.sharedTasks.set(signature, shared);
       this.enqueueSharedTask(shared);
@@ -344,16 +325,15 @@ export class TranslatorController {
       id: imageId,
       image,
       shared,
+      presentation: createImagePresentationState(image, sourceUrl),
       showOriginal: false,
       ignored: false,
       canceled: false
     });
     this.renderImages();
-    this.syncPrefetchWindow(false);
-    this.scheduleScrollIdlePrefetch();
   }
 
-  private enqueueSharedTask(shared: SharedImageTask, priority = 0): void {
+  private enqueueSharedTask(shared: SharedImageTask): void {
     if (shared.activeTask) {
       return;
     }
@@ -363,14 +343,10 @@ export class TranslatorController {
     shared.message = "等待抓取原图";
     shared.queuePosition = null;
     shared.servedFromCache = false;
-    shared.resultFolder = null;
-    shared.finalResultFetched = false;
-    shared.finalFetchInFlight = null;
 
     const generation = this.generation;
     this.queue.enqueue({
       id: shared.taskId,
-      priority,
       onQueued: () => {
         if (generation !== this.generation) {
           return;
@@ -388,21 +364,18 @@ export class TranslatorController {
         this.renderImages();
       },
       run: async (signal) => {
-        const preferRemoteUrl = await this.transport.shouldUseRemoteUrl(this.settings, shared.sourceUrl);
-        this.applyHealth(this.transport.getCachedHealth(this.settings));
+        const sourceBlob = await this.transport.fetchImageBlob(shared.sourceUrl, signal);
         if (generation !== this.generation) {
           return;
         }
 
-        let sourceBlob: Blob | null = null;
         let cacheKey: string | null = null;
-        if (this.settings.cacheEnabled && !preferRemoteUrl) {
+        if (this.settings.cacheEnabled) {
           shared.status = "processing";
           shared.message = "检查本地缓存";
           this.renderImages();
 
-          sourceBlob = await this.transport.fetchImageBlob(shared.sourceUrl, signal);
-          cacheKey = await this.resultCache.buildKey(sourceBlob, this.settings);
+          cacheKey = await this.resultCache.buildKey(sourceBlob, shared.sourceUrl, this.settings);
           if (cacheKey) {
             const cachedResult = await this.resultCache.get(cacheKey);
             if (generation !== this.generation) {
@@ -422,24 +395,13 @@ export class TranslatorController {
           }
         }
 
-        if (!preferRemoteUrl && !sourceBlob) {
-          shared.status = "processing";
-          shared.message = "抓取原图";
-          this.renderImages();
-          sourceBlob = await this.transport.fetchImageBlob(shared.sourceUrl, signal);
-          if (generation !== this.generation) {
-            return;
-          }
-        }
-
         shared.status = "processing";
-        shared.message = preferRemoteUrl ? "提交源图地址" : "上传到翻译服务";
+        shared.message = "上传到翻译服务";
         this.renderImages();
 
         const result = await this.transport.translateImage({
-          imageBlob: sourceBlob ?? undefined,
+          imageBlob: sourceBlob,
           fileName: deriveFileName(shared.sourceUrl),
-          sourceUrl: shared.sourceUrl,
           settings: this.settings,
           signal,
           onEvent: (event) => this.handleTranslationEvent(shared, generation, event)
@@ -453,12 +415,10 @@ export class TranslatorController {
           await this.resultCache.set(cacheKey, result);
         }
 
-        if (!shared.finalResultFetched) {
-          if (shared.resultUrl) {
-            URL.revokeObjectURL(shared.resultUrl);
-          }
-          shared.resultUrl = URL.createObjectURL(result);
+        if (shared.resultUrl) {
+          URL.revokeObjectURL(shared.resultUrl);
         }
+        shared.resultUrl = URL.createObjectURL(result);
       },
       onSuccess: () => {
         if (generation !== this.generation) {
@@ -466,11 +426,7 @@ export class TranslatorController {
         }
         shared.activeTask = false;
         shared.status = "complete";
-        shared.message = shared.servedFromCache
-          ? "已从缓存加载"
-          : shared.finalResultFetched
-            ? "已提前加载最终图"
-            : "翻译完成";
+        shared.message = shared.servedFromCache ? "已从缓存加载" : "翻译完成";
         shared.queuePosition = null;
         this.connection = createConnectionState(
           shared.servedFromCache ? "已命中本地缓存" : "翻译服务已响应",
@@ -510,7 +466,7 @@ export class TranslatorController {
     generation: number,
     event: TranslationEvent
   ): void {
-    if (generation !== this.generation) {
+    if (generation !== this.generation || !isRenderableEvent(event)) {
       return;
     }
 
@@ -531,20 +487,6 @@ export class TranslatorController {
     }
 
     if (event.code === 1) {
-      if (event.text.startsWith("rendering_folder:")) {
-        shared.resultFolder = event.text.slice("rendering_folder:".length) || null;
-        return;
-      }
-
-      if (event.text.startsWith("final_ready:")) {
-        const folderName = event.text.slice("final_ready:".length) || shared.resultFolder;
-        if (folderName) {
-          shared.resultFolder = folderName;
-          void this.fetchFinalResult(shared, generation, folderName);
-        }
-        return;
-      }
-
       shared.status = "processing";
       shared.message = deriveProgressMessage(event);
       this.renderImages();
@@ -558,25 +500,39 @@ export class TranslatorController {
     this.overlay.updateAdapterStates(this.adapterStates);
     this.resetRuntimeState();
     this.rebuildDiscovery();
-    this.queue.setMaxConcurrency(this.getEffectiveMaxConcurrency());
+    this.queue.setMaxConcurrency(this.settings.maxConcurrency);
     this.enabled = this.settings.autoTranslateEnabled;
+    this.clearInitialAutoTranslateScan();
     if (this.enabled) {
+      this.discoveryReady = true;
       this.queue.resume();
+      this.discovery?.reset();
       this.discovery?.rescan();
-      this.syncPrefetchWindow(false);
-      this.scheduleScrollIdlePrefetch();
     } else {
+      this.discoveryReady = false;
       this.queue.pause();
-      this.clearScrollIdlePrefetch();
     }
     this.overlay.toast("设置已保存。后续任务将使用新配置。", "neutral");
     this.renderChrome();
-    void this.refreshServerHealth(true);
+  }
+
+  private async clearCache(): Promise<void> {
+    const cleared = await this.resultCache.clear();
+    if (cleared) {
+      this.overlay.toast("本地缓存已清空。", "neutral");
+      return;
+    }
+
+    this.overlay.toast("清理本地缓存失败。", "error");
   }
 
   private resetRuntimeState(): void {
+    this.clearInitialAutoTranslateScan();
     this.generation += 1;
     this.queue.reset("canceled");
+    for (const entry of this.imageEntries.values()) {
+      releaseImagePresentation(entry.image, entry.presentation);
+    }
     for (const shared of this.sharedTasks.values()) {
       if (shared.resultUrl) {
         URL.revokeObjectURL(shared.resultUrl);
@@ -586,8 +542,53 @@ export class TranslatorController {
     this.sharedTasks.clear();
     this.imageIds = new WeakMap<HTMLImageElement, string>();
     this.discovery?.reset();
-    this.clearScrollIdlePrefetch();
     this.renderImages();
+  }
+
+  private scheduleInitialAutoTranslateScan(): void {
+    this.discoveryReady = false;
+    this.clearInitialAutoTranslateScan();
+
+    if (document.readyState === "complete") {
+      this.startInitialAutoTranslateTimer();
+      return;
+    }
+
+    this.waitingForInitialAutoScanLoad = true;
+    window.addEventListener(
+      "load",
+      this.handleInitialAutoScanLoad,
+      { once: true }
+    );
+  }
+
+  private handleInitialAutoScanLoad = (): void => {
+    this.waitingForInitialAutoScanLoad = false;
+    this.startInitialAutoTranslateTimer();
+  };
+
+  private startInitialAutoTranslateTimer(): void {
+    this.initialAutoScanTimer = window.setTimeout(() => {
+      this.initialAutoScanTimer = null;
+      if (!this.enabled) {
+        return;
+      }
+      this.discoveryReady = true;
+      this.discovery?.reset();
+      this.discovery?.rescan();
+    }, INITIAL_AUTO_TRANSLATE_SCAN_DELAY_MS);
+  }
+
+  private clearInitialAutoTranslateScan(): void {
+    if (this.waitingForInitialAutoScanLoad) {
+      window.removeEventListener("load", this.handleInitialAutoScanLoad);
+      this.waitingForInitialAutoScanLoad = false;
+    }
+
+    if (this.initialAutoScanTimer !== null) {
+      window.clearTimeout(this.initialAutoScanTimer);
+      this.initialAutoScanTimer = null;
+    }
   }
 
   private refreshAdapterState(): void {
@@ -642,7 +643,6 @@ export class TranslatorController {
     entry.canceled = false;
     this.cancelSharedTaskIfUnused(entry.shared, "ignored");
     this.renderImages();
-    this.syncPrefetchWindow(false);
   }
 
   private cancelImage(id: string): void {
@@ -654,7 +654,6 @@ export class TranslatorController {
     entry.ignored = false;
     this.cancelSharedTaskIfUnused(entry.shared, "canceled");
     this.renderImages();
-    this.syncPrefetchWindow(false);
   }
 
   private retryImage(id: string): void {
@@ -672,12 +671,10 @@ export class TranslatorController {
     }
 
     if (!entry.shared.activeTask) {
-      this.enqueueSharedTask(entry.shared, 0);
+      this.enqueueSharedTask(entry.shared);
     }
 
     this.renderImages();
-    this.syncPrefetchWindow(false);
-    this.scheduleScrollIdlePrefetch();
   }
 
   private cancelSharedTaskIfUnused(shared: SharedImageTask, reason: CancelReason): void {
@@ -692,191 +689,9 @@ export class TranslatorController {
     }
   }
 
-  private clearScrollIdlePrefetch(): void {
-    if (this.scrollIdleTimer === null) {
-      return;
-    }
-    window.clearTimeout(this.scrollIdleTimer);
-    this.scrollIdleTimer = null;
-  }
-
-  private scheduleScrollIdlePrefetch(): void {
-    if (!this.enabled) {
-      return;
-    }
-
-    this.clearScrollIdlePrefetch();
-    this.scrollIdleTimer = window.setTimeout(() => {
-      this.scrollIdleTimer = null;
-      this.syncPrefetchWindow(true);
-    }, PREFETCH_SCROLL_IDLE_MS);
-  }
-
-  private syncPrefetchWindow(allowAheadPrefetch: boolean): void {
-    if (!this.enabled) {
-      return;
-    }
-
-    const candidates = this.collectPrefetchCandidates();
-    if (candidates.length === 0) {
-      return;
-    }
-
-    const targetTaskIds = new Set<string>();
-    const visibleCandidates = candidates.filter((candidate) => candidate.zone === "visible");
-
-    for (const candidate of visibleCandidates) {
-      targetTaskIds.add(candidate.shared.taskId);
-    }
-
-    if (allowAheadPrefetch) {
-      const queuedAheadCandidates = candidates.filter(
-        (candidate) => candidate.zone !== "visible" && candidate.zone !== "cold"
-      );
-      let remainingBudget = PREFETCH_MAX_QUEUE_AHEAD;
-
-      for (const candidate of queuedAheadCandidates) {
-        if (remainingBudget <= 0) {
-          break;
-        }
-        targetTaskIds.add(candidate.shared.taskId);
-        remainingBudget -= 1;
-      }
-    }
-
-    for (const candidate of candidates) {
-      const isTargetTask = targetTaskIds.has(candidate.shared.taskId);
-
-      if (!isTargetTask) {
-        if (candidate.shared.activeTask) {
-          this.queue.setPriority(candidate.shared.taskId, 0);
-        } else if (this.isAutoSchedulableShared(candidate.shared)) {
-          candidate.shared.status = "queued";
-          candidate.shared.message = "等待进入预翻窗口";
-          candidate.shared.queuePosition = null;
-        }
-        continue;
-      }
-
-      if (candidate.shared.activeTask) {
-        this.queue.setPriority(candidate.shared.taskId, candidate.priority);
-        continue;
-      }
-
-      if (!this.isAutoSchedulableShared(candidate.shared)) {
-        continue;
-      }
-
-      this.enqueueSharedTask(candidate.shared, candidate.priority);
-    }
-
-    this.renderImages();
-  }
-
-  private collectPrefetchCandidates(): PrefetchCandidate[] {
-    const candidates: PrefetchCandidate[] = [];
-
-    for (const shared of this.sharedTasks.values()) {
-      const candidate = this.evaluateSharedTaskPrefetch(shared);
-      if (candidate) {
-        candidates.push(candidate);
-      }
-    }
-
-    candidates.sort((left, right) => right.priority - left.priority);
-    return candidates;
-  }
-
-  private evaluateSharedTaskPrefetch(shared: SharedImageTask): PrefetchCandidate | null {
-    let bestCandidate: PrefetchCandidate | null = null;
-
-    for (const imageId of shared.imageIds) {
-      const entry = this.imageEntries.get(imageId);
-      if (!entry || entry.ignored || entry.canceled || !entry.image.isConnected) {
-        continue;
-      }
-
-      const rect = entry.image.getBoundingClientRect();
-      const candidate = this.buildPrefetchCandidate(shared, rect);
-      if (!candidate) {
-        continue;
-      }
-
-      if (!bestCandidate || candidate.priority > bestCandidate.priority) {
-        bestCandidate = candidate;
-      }
-    }
-
-    return bestCandidate;
-  }
-
-  private buildPrefetchCandidate(shared: SharedImageTask, rect: DOMRect): PrefetchCandidate | null {
-    if (rect.width <= 0 || rect.height <= 0) {
-      return null;
-    }
-
-    const viewportHeight = Math.max(window.innerHeight, 1);
-    const viewportCenter = viewportHeight / 2;
-    const hotAheadPx = viewportHeight * PREFETCH_HOT_AHEAD_VIEWPORTS;
-    const hotBehindPx = viewportHeight * PREFETCH_HOT_BEHIND_VIEWPORTS;
-    const warmAheadPx = viewportHeight * PREFETCH_WARM_AHEAD_VIEWPORTS;
-    const rectCenter = rect.top + rect.height / 2;
-    const belowDistance = rect.top - viewportHeight;
-    const aboveDistance = 0 - rect.bottom;
-
-    if (rect.bottom >= 0 && rect.top <= viewportHeight) {
-      return {
-        shared,
-        zone: "visible",
-        priority: 400000 - Math.abs(rectCenter - viewportCenter)
-      };
-    }
-
-    if (belowDistance >= 0 && belowDistance <= hotAheadPx) {
-      return {
-        shared,
-        zone: "ahead",
-        priority:
-          (this.scrollDirection === "down" ? 320000 : 260000) -
-          belowDistance
-      };
-    }
-
-    if (aboveDistance >= 0 && aboveDistance <= hotBehindPx) {
-      return {
-        shared,
-        zone: "behind",
-        priority:
-          (this.scrollDirection === "up" ? 300000 : 210000) -
-          aboveDistance
-      };
-    }
-
-    if (belowDistance >= 0 && belowDistance <= warmAheadPx) {
-      return {
-        shared,
-        zone: "warm",
-        priority: 120000 - belowDistance
-      };
-    }
-
-    return {
-      shared,
-      zone: "cold",
-      priority: 0
-    };
-  }
-
-  private isAutoSchedulableShared(shared: SharedImageTask): boolean {
-    return !shared.activeTask && !shared.resultUrl && shared.status !== "error" && shared.status !== "canceled" && shared.status !== "ignored";
-  }
-
   private async testConnection(): Promise<void> {
     try {
-      const health = await this.refreshServerHealth(false);
-      if (!health) {
-        throw new Error("Failed to reach the translation server.");
-      }
+      const health = await this.transport.checkHealth(this.settings);
       this.connection = createConnectionState(
         `连接成功 · v${health.version} · 队列 ${health.queue_size}`,
         "success"
@@ -908,77 +723,5 @@ export class TranslatorController {
     }
 
     return "未知错误";
-  }
-
-  private getEffectiveMaxConcurrency(health: HealthPayload | null = this.transport.getCachedHealth(this.settings)): number {
-    const totalInstances = health?.total_instances;
-    if (!Number.isFinite(totalInstances) || totalInstances === undefined || totalInstances <= 0) {
-      return this.settings.maxConcurrency;
-    }
-    return Math.max(1, Math.min(this.settings.maxConcurrency, Math.trunc(totalInstances)));
-  }
-
-  private applyHealth(health: HealthPayload | null): void {
-    if (!health) {
-      return;
-    }
-    this.queue.setMaxConcurrency(this.getEffectiveMaxConcurrency(health));
-  }
-
-  private async refreshServerHealth(silent: boolean): Promise<HealthPayload | null> {
-    try {
-      const health = await this.transport.checkHealth(this.settings);
-      this.applyHealth(health);
-      return health;
-    } catch (error) {
-      if (!silent) {
-        throw error;
-      }
-      return null;
-    }
-  }
-
-  private async fetchFinalResult(
-    shared: SharedImageTask,
-    generation: number,
-    folderName: string
-  ): Promise<void> {
-    if (generation !== this.generation || shared.finalResultFetched || shared.finalFetchInFlight) {
-      return;
-    }
-
-    shared.status = "processing";
-    shared.message = "最终结果已就绪，正在拉取";
-    this.renderImages();
-
-    shared.finalFetchInFlight = this.transport
-      .fetchFinalImage(this.settings, folderName)
-      .then((finalBlob) => {
-        if (generation !== this.generation) {
-          return;
-        }
-
-        if (shared.resultUrl) {
-          URL.revokeObjectURL(shared.resultUrl);
-        }
-        shared.resultUrl = URL.createObjectURL(finalBlob);
-        shared.finalResultFetched = true;
-        shared.message = shared.activeTask ? "最终结果已就绪" : "翻译完成";
-        this.renderImages();
-      })
-      .catch(() => {
-        if (generation !== this.generation) {
-          return;
-        }
-        this.renderImages();
-      })
-      .finally(() => {
-        if (generation !== this.generation) {
-          return;
-        }
-        shared.finalFetchInFlight = null;
-      });
-
-    await shared.finalFetchInFlight;
   }
 }

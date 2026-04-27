@@ -4,7 +4,6 @@ export type CancelReason = "canceled" | "ignored";
 
 export interface QueueTask {
   id: string;
-  priority?: number;
   run: (signal: AbortSignal) => Promise<void>;
   onQueued?: () => void;
   onStart?: () => void;
@@ -17,7 +16,6 @@ interface QueueTaskRecord extends QueueTask {
   status: "queued" | "running" | "completed" | "error" | "ignored" | "canceled";
   controller: AbortController | null;
   cancelReason: CancelReason | null;
-  priority: number;
 }
 
 interface TaskQueueOptions {
@@ -54,14 +52,13 @@ export class TaskQueue {
 
     const record: QueueTaskRecord = {
       ...task,
-      priority: Number.isFinite(task.priority) ? Number(task.priority) : 0,
       status: "queued",
       controller: null,
       cancelReason: null
     };
 
     this.tasks.set(task.id, record);
-    this.insertPendingTask(record.id, record.priority);
+    this.pendingOrder.push(task.id);
     task.onQueued?.();
     this.emitStats();
     this.drain();
@@ -123,28 +120,6 @@ export class TaskQueue {
     this.drain();
   }
 
-  setPriority(taskId: string, priority: number): void {
-    const record = this.tasks.get(taskId);
-    if (!record) {
-      return;
-    }
-
-    record.priority = Number.isFinite(priority) ? Number(priority) : 0;
-    if (record.status !== "queued") {
-      return;
-    }
-
-    const pendingIndex = this.pendingOrder.indexOf(taskId);
-    if (pendingIndex >= 0) {
-      this.pendingOrder.splice(pendingIndex, 1);
-    }
-    this.insertPendingTask(taskId, record.priority);
-  }
-
-  getTaskStatus(taskId: string): QueueTaskRecord["status"] | null {
-    return this.tasks.get(taskId)?.status ?? null;
-  }
-
   getStats(): QueueStats {
     let queued = 0;
     let running = 0;
@@ -197,25 +172,6 @@ export class TaskQueue {
       }
       this.startTask(record);
     }
-  }
-
-  private insertPendingTask(taskId: string, priority: number): void {
-    let insertIndex = 0;
-
-    while (insertIndex < this.pendingOrder.length) {
-      const queuedTaskId = this.pendingOrder[insertIndex];
-      if (!queuedTaskId) {
-        break;
-      }
-
-      const queuedRecord = this.tasks.get(queuedTaskId);
-      if (!queuedRecord || queuedRecord.priority < priority) {
-        break;
-      }
-      insertIndex += 1;
-    }
-
-    this.pendingOrder.splice(insertIndex, 0, taskId);
   }
 
   private getRunningCount(): number {

@@ -55,6 +55,7 @@ function createOverlay(
     onToggleSession: vi.fn(),
     onToggleGlobalOriginal: vi.fn(),
     onTestConnection: vi.fn(),
+    onClearCache: vi.fn(),
     onSaveSettings: vi.fn(),
     onToggleImageOriginal: vi.fn(),
     onRetryImage: vi.fn(),
@@ -65,7 +66,16 @@ function createOverlay(
 }
 
 describe("OverlayManager", () => {
-  it("syncs overlay position with image bounds and toggles compact details", () => {
+  it("mounts image status inside the image container and toggles compact details", () => {
+    const container = document.createElement("div");
+    container.getBoundingClientRect = () =>
+      ({
+        left: 20,
+        top: 40,
+        width: 400,
+        height: 560
+      }) as DOMRect;
+
     const image = document.createElement("img");
     image.getBoundingClientRect = () =>
       ({
@@ -74,7 +84,8 @@ describe("OverlayManager", () => {
         width: 360,
         height: 520
       }) as DOMRect;
-    document.body.appendChild(image);
+    container.appendChild(image);
+    document.body.appendChild(container);
 
     const overlay = createOverlay();
 
@@ -93,21 +104,29 @@ describe("OverlayManager", () => {
       }
     ]);
 
-    const overlayItem = overlay.shadowRoot.querySelector(".mit-overlay-item") as HTMLDivElement;
-    const badge = overlay.shadowRoot.querySelector(".mit-status-card") as HTMLDivElement;
-    const compactToggle = overlay.shadowRoot.querySelector(".mit-compact-toggle") as HTMLButtonElement;
-    expect(overlayItem.style.left).toBe("24px");
-    expect(overlayItem.style.top).toBe("48px");
-    expect(overlayItem.style.width).toBe("360px");
-    expect(overlayItem.style.height).toBe("520px");
+    const overlayHost = container.querySelector('[data-mit-inline-status="image-1"]') as HTMLDivElement;
+    const badge = overlayHost.shadowRoot?.querySelector(".mit-status-card") as HTMLDivElement;
+    const compactToggle = overlayHost.shadowRoot?.querySelector(
+      ".mit-compact-toggle"
+    ) as HTMLButtonElement;
+    const overlayItemInDock = overlay.shadowRoot.querySelector(".mit-overlay-item");
+    expect(overlayHost.parentElement).toBe(container);
+    expect(container.style.position).toBe("relative");
+    expect(overlayHost.style.left).toBe("4px");
+    expect(overlayHost.style.top).toBe("8px");
+    expect(overlayHost.style.width).toBe("360px");
+    expect(overlayHost.style.height).toBe("520px");
     expect(badge.dataset.compact).toBe("true");
     expect(badge.dataset.expanded).toBe("false");
     expect(compactToggle.dataset.status).toBe("complete");
+    expect(overlayItemInDock).toBeNull();
 
     compactToggle.click();
     expect(badge.dataset.expanded).toBe("true");
 
     overlay.destroy();
+    expect(container.querySelector('[data-mit-inline-status="image-1"]')).toBeNull();
+    expect(container.style.position).toBe("");
   });
 
   it("starts collapsed and only opens the panel from settings", () => {
@@ -151,7 +170,8 @@ describe("OverlayManager", () => {
 
   it("groups settings into collapsible sections and keeps save actions outside the scroll body", () => {
     const onSaveSettings = vi.fn();
-    const overlay = createOverlay({ onSaveSettings });
+    const onClearCache = vi.fn();
+    const overlay = createOverlay({ onSaveSettings, onClearCache });
 
     const settingsLauncher = overlay.shadowRoot.querySelector(
       '.mit-launcher-button[data-kind="settings"]'
@@ -197,7 +217,6 @@ describe("OverlayManager", () => {
         "修复尺寸",
         "遮罩膨胀",
         "上传方式",
-        "源图传输",
         "自动启动",
         "启用缓存",
         "并发上限"
@@ -231,7 +250,9 @@ describe("OverlayManager", () => {
       overlay.shadowRoot.querySelectorAll(".mit-adapter-status"),
       (node) => node.textContent
     );
-    const saveButton = settingsFooter.querySelector(".mit-btn") as HTMLButtonElement;
+    const footerButtons = Array.from(settingsFooter.querySelectorAll(".mit-btn")) as HTMLButtonElement[];
+    const clearButton = footerButtons.find((button) => button.textContent === "清理缓存") as HTMLButtonElement;
+    const saveButton = footerButtons.find((button) => button.textContent === "保存设置") as HTMLButtonElement;
 
     expect(serverInput.autocomplete).toBe("off");
     expect(serverInput.getAttribute("autocapitalize")).toBe("off");
@@ -245,14 +266,15 @@ describe("OverlayManager", () => {
     cacheCheckbox.checked = false;
     concurrencyInput.value = "4";
     adapterCheckboxes[0]!.checked = false;
+    clearButton.click();
     saveButton.click();
 
+    expect(onClearCache).toHaveBeenCalledTimes(1);
     expect(onSaveSettings).toHaveBeenCalledWith(
       expect.objectContaining({
         serverBaseUrl: "https://translator.internal",
         cacheEnabled: false,
         maxConcurrency: 4,
-        sourceTransferMode: "auto",
         adapterOverrides: {
           mamekichimameko: false,
           generic: true

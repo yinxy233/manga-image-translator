@@ -12,7 +12,6 @@ import {
   MIN_MASK_DILATION_OFFSET,
   MIN_UNCLIP_RATIO,
   RENDER_DIRECTION_OPTIONS,
-  SOURCE_TRANSFER_MODE_OPTIONS,
   TRANSLATOR_OPTIONS,
   TRANSPORT_OPTIONS
 } from "../config";
@@ -38,6 +37,7 @@ export interface OverlayManagerCallbacks {
   onToggleSession: () => void;
   onToggleGlobalOriginal: () => void;
   onTestConnection: () => void;
+  onClearCache: () => void;
   onSaveSettings: (settings: UserscriptSettings) => void;
   onToggleImageOriginal: (id: string) => void;
   onRetryImage: (id: string) => void;
@@ -48,8 +48,8 @@ export interface OverlayManagerCallbacks {
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
 interface OverlayItemRefs {
-  container: HTMLDivElement;
-  result: HTMLImageElement;
+  host: HTMLDivElement;
+  mountTarget: HTMLElement | null;
   badge: HTMLDivElement;
   compactToggle: HTMLButtonElement;
   details: HTMLDivElement;
@@ -73,6 +73,12 @@ interface SettingsSectionOptions {
   title: string;
   content: HTMLElement;
   open?: boolean;
+}
+
+interface MountTargetState {
+  refCount: number;
+  originalPosition: string;
+  appliedRelativePosition: boolean;
 }
 
 function deriveAdapterStatus(adapterState: SiteAdapterState): string {
@@ -127,16 +133,6 @@ const STYLE_TEXT = `
     position: fixed;
     inset: auto auto auto auto;
     pointer-events: none;
-  }
-
-  .mit-overlay-image {
-    width: 100%;
-    height: 100%;
-    object-fit: fill;
-    display: block;
-    border-radius: 8px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
-    transition: opacity 160ms ease;
   }
 
   .mit-status-card {
@@ -367,8 +363,7 @@ const STYLE_TEXT = `
     color: inherit;
   }
 
-  .mit-btn:not([data-tone]),
-  .mit-settings-actions .mit-btn {
+  .mit-btn:not([data-tone]) {
     border-color: #2563eb;
     background: #2563eb;
     color: #ffffff;
@@ -1055,14 +1050,287 @@ const STYLE_TEXT = `
   }
 `;
 
+const ITEM_STYLE_TEXT = `
+  :host {
+    all: initial;
+    position: absolute;
+    inset: auto auto auto auto;
+    display: block;
+    pointer-events: none;
+    z-index: 2147483645;
+    color: #131313;
+  }
+
+  :host,
+  :host * {
+    box-sizing: border-box;
+    font-family: "Avenir Next", "Segoe UI Variable", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  }
+
+  .mit-status-card {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    max-width: min(220px, calc(100% - 20px));
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(17, 24, 39, 0.56);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    color: rgba(249, 250, 251, 0.96);
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.14);
+    pointer-events: auto;
+    backdrop-filter: blur(10px) saturate(1.15);
+  }
+
+  .mit-status-card[data-compact="true"] {
+    max-width: none;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+
+  .mit-status-card[data-status="error"] {
+    background: rgba(127, 29, 29, 0.58);
+    border-color: rgba(254, 202, 202, 0.18);
+    color: rgba(254, 242, 242, 0.98);
+  }
+
+  .mit-status-card[data-status="complete"] {
+    background: rgba(22, 101, 52, 0.58);
+    border-color: rgba(220, 252, 231, 0.18);
+    color: rgba(240, 253, 244, 0.98);
+  }
+
+  .mit-status-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .mit-status-text {
+    font-size: 12px;
+    line-height: 1.3;
+    font-weight: 700;
+  }
+
+  .mit-status-queue {
+    margin-top: 4px;
+    font-size: 10px;
+    opacity: 0.84;
+  }
+
+  .mit-status-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 8px;
+  }
+
+  .mit-compact-toggle {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 999px;
+    background: rgba(17, 24, 39, 0.62);
+    color: #ffffff;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.16);
+    backdrop-filter: blur(10px) saturate(1.15);
+    font-size: 12px;
+    font-weight: 800;
+    line-height: 1;
+    position: relative;
+    overflow: hidden;
+    transition: opacity 180ms ease, transform 180ms ease, background 160ms ease;
+  }
+
+  .mit-compact-toggle[data-status="complete"] {
+    background: rgba(22, 101, 52, 0.76);
+  }
+
+  .mit-compact-toggle[data-status="error"] {
+    background: rgba(153, 27, 27, 0.78);
+  }
+
+  .mit-compact-toggle::after {
+    content: "";
+    position: absolute;
+    inset: 1px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    opacity: 0;
+  }
+
+  .mit-compact-toggle[data-status="processing"]::after,
+  .mit-compact-toggle[data-status="queued"]::after,
+  .mit-compact-toggle[data-status="pending"]::after {
+    opacity: 1;
+    border-top-color: rgba(255, 255, 255, 0.9);
+    border-right-color: rgba(255, 255, 255, 0.4);
+    border-bottom-color: rgba(255, 255, 255, 0.16);
+    border-left-color: rgba(255, 255, 255, 0.16);
+    animation: mit-spin 1.1s linear infinite;
+  }
+
+  .mit-status-card[data-status="complete"]:not([data-expanded="true"]) .mit-compact-toggle {
+    opacity: 0;
+    transform: scale(0.92);
+    pointer-events: none;
+  }
+
+  .mit-status-details {
+    display: block;
+  }
+
+  .mit-status-card[data-compact="true"] .mit-compact-toggle {
+    display: inline-flex;
+  }
+
+  .mit-status-card[data-compact="true"] .mit-status-details {
+    display: none;
+    margin-top: 6px;
+    max-width: min(220px, calc(100vw - 32px));
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(17, 24, 39, 0.58);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.14);
+    color: rgba(249, 250, 251, 0.96);
+    backdrop-filter: blur(10px) saturate(1.15);
+  }
+
+  .mit-status-card[data-compact="true"][data-status="complete"],
+  .mit-status-card[data-compact="true"][data-status="error"] {
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+
+  .mit-status-card[data-compact="true"][data-status="complete"] .mit-status-details {
+    background: rgba(22, 101, 52, 0.6);
+    color: rgba(240, 253, 244, 0.98);
+  }
+
+  .mit-status-card[data-compact="true"][data-status="error"] .mit-status-details {
+    background: rgba(127, 29, 29, 0.62);
+    color: rgba(254, 242, 242, 0.98);
+  }
+
+  .mit-status-card[data-compact="true"][data-expanded="true"] .mit-status-details {
+    display: block;
+  }
+
+  @keyframes mit-spin {
+    from {
+      transform: rotate(0deg);
+    }
+
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .mit-btn {
+    appearance: none;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    background: #ffffff;
+    color: #111827;
+    cursor: pointer;
+    transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+    min-height: 36px;
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1;
+  }
+
+  .mit-btn:hover {
+    background: #f3f4f6;
+  }
+
+  .mit-btn[data-tone="ghost"] {
+    background: #ffffff;
+    color: #111827;
+  }
+
+  .mit-btn[data-tone="danger"] {
+    border-color: #fca5a5;
+    background: #fef2f2;
+    color: #b91c1c;
+  }
+
+  .mit-status-card .mit-btn {
+    min-height: 26px;
+    padding: 5px 8px;
+    font-size: 10px;
+    border-radius: 999px;
+    border-color: rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.12);
+    color: inherit;
+    backdrop-filter: blur(8px);
+  }
+
+  .mit-status-card .mit-btn:hover {
+    background: rgba(255, 255, 255, 0.18);
+  }
+
+  .mit-status-card .mit-btn[data-tone="danger"] {
+    border-color: rgba(254, 202, 202, 0.18);
+    background: rgba(185, 28, 28, 0.24);
+    color: inherit;
+  }
+
+  .mit-btn:not([data-tone]) {
+    border-color: #2563eb;
+    background: #2563eb;
+    color: #ffffff;
+  }
+
+  @media (pointer: coarse) {
+    .mit-btn {
+      min-height: 42px;
+      font-size: 13px;
+    }
+
+    .mit-compact-toggle {
+      width: 30px;
+      height: 30px;
+      font-size: 13px;
+    }
+  }
+
+  @media (max-width: 720px) {
+    .mit-status-card {
+      left: 8px;
+      right: 8px;
+      top: auto;
+      bottom: 8px;
+      max-width: none;
+      padding: 8px 9px;
+    }
+
+    .mit-status-card[data-compact="true"] {
+      left: 8px;
+      right: auto;
+      top: 8px;
+      bottom: auto;
+    }
+  }
+`;
+
 export class OverlayManager {
   readonly shadowRoot: ShadowRoot;
 
   private readonly callbacks: OverlayManagerCallbacks;
 
   private readonly host: HTMLDivElement;
-
-  private readonly overlayLayer: HTMLDivElement;
 
   private readonly dock: HTMLDivElement;
 
@@ -1124,8 +1392,6 @@ export class OverlayManager {
 
   private readonly transportSelect: HTMLSelectElement;
 
-  private readonly sourceTransferModeSelect: HTMLSelectElement;
-
   private readonly autoCheckbox: HTMLInputElement;
 
   private readonly cacheCheckbox: HTMLInputElement;
@@ -1145,6 +1411,8 @@ export class OverlayManager {
   >();
 
   private readonly itemRefs = new Map<string, OverlayItemRefs>();
+
+  private readonly mountTargetStates = new WeakMap<HTMLElement, MountTargetState>();
 
   private viewModels = new Map<string, OverlayViewModel>();
 
@@ -1177,9 +1445,6 @@ export class OverlayManager {
 
     const root = document.createElement("div");
     root.className = "mit-root";
-
-    this.overlayLayer = document.createElement("div");
-    this.overlayLayer.className = "mit-overlay-layer";
 
     this.toastLayer = document.createElement("div");
     this.toastLayer.className = "mit-toast-layer";
@@ -1226,7 +1491,6 @@ export class OverlayManager {
     this.inpaintingSizeInput = document.createElement("select");
     this.maskDilationOffsetInput = document.createElement("input");
     this.transportSelect = document.createElement("select");
-    this.sourceTransferModeSelect = document.createElement("select");
     this.autoCheckbox = document.createElement("input");
     this.cacheCheckbox = document.createElement("input");
     this.concurrencyInput = document.createElement("input");
@@ -1236,7 +1500,7 @@ export class OverlayManager {
     this.settingsFooter = this.buildSettingsFooter();
     this.dock.append(...this.buildDockContent());
 
-    root.append(this.overlayLayer, this.dock, this.launcherGroup, this.toastLayer);
+    root.append(this.dock, this.launcherGroup, this.toastLayer);
     this.shadowRoot.append(style, root);
 
     window.addEventListener("scroll", this.handleViewportChange, { passive: true });
@@ -1283,7 +1547,6 @@ export class OverlayManager {
     }
     this.maskDilationOffsetInput.value = String(settings.maskDilationOffset);
     this.transportSelect.value = settings.uploadTransport;
-    this.sourceTransferModeSelect.value = settings.sourceTransferMode;
     this.autoCheckbox.checked = settings.autoTranslateEnabled;
     this.cacheCheckbox.checked = settings.cacheEnabled;
     this.concurrencyInput.value = String(settings.maxConcurrency);
@@ -1317,7 +1580,8 @@ export class OverlayManager {
     const nextIds = new Set(this.viewModels.keys());
     for (const [id, refs] of this.itemRefs.entries()) {
       if (!nextIds.has(id)) {
-        refs.container.remove();
+        this.mountOverlayItem(refs, null);
+        refs.host.remove();
         this.itemRefs.delete(id);
         this.expandedCompactItems.delete(id);
       }
@@ -1331,8 +1595,6 @@ export class OverlayManager {
       refs.status.textContent = viewModel.message;
       refs.queue.textContent = viewModel.queuePosition ? `队列位置 #${viewModel.queuePosition}` : "";
       refs.queue.style.display = viewModel.queuePosition ? "block" : "none";
-      refs.result.src = viewModel.resultUrl ?? "";
-      refs.result.style.opacity = viewModel.showOriginal || !viewModel.resultUrl ? "0" : "1";
       refs.compactToggle.dataset.status = viewModel.status;
       refs.compactToggle.title = viewModel.message;
       refs.compactToggle.setAttribute("aria-label", viewModel.message);
@@ -1353,17 +1615,22 @@ export class OverlayManager {
         continue;
       }
 
+      const mountTarget = this.resolveMountTarget(viewModel.image);
       const rect = viewModel.image.getBoundingClientRect();
-      if (!viewModel.image.isConnected || rect.width <= 0 || rect.height <= 0) {
-        refs.container.style.display = "none";
+      if (!viewModel.image.isConnected || !mountTarget?.isConnected || rect.width <= 0 || rect.height <= 0) {
+        refs.host.style.display = "none";
+        this.mountOverlayItem(refs, null);
         continue;
       }
 
-      refs.container.style.display = "block";
-      refs.container.style.left = `${rect.left}px`;
-      refs.container.style.top = `${rect.top}px`;
-      refs.container.style.width = `${rect.width}px`;
-      refs.container.style.height = `${rect.height}px`;
+      this.mountOverlayItem(refs, mountTarget);
+
+      const mountRect = mountTarget.getBoundingClientRect();
+      refs.host.style.display = "block";
+      refs.host.style.left = `${rect.left - mountRect.left}px`;
+      refs.host.style.top = `${rect.top - mountRect.top}px`;
+      refs.host.style.width = `${rect.width}px`;
+      refs.host.style.height = `${rect.height}px`;
     }
   }
 
@@ -1380,6 +1647,11 @@ export class OverlayManager {
     window.removeEventListener("scroll", this.handleViewportChange);
     window.removeEventListener("resize", this.handleViewportChange);
     this.stopLauncherDrag();
+    for (const refs of this.itemRefs.values()) {
+      this.mountOverlayItem(refs, null);
+      refs.host.remove();
+    }
+    this.itemRefs.clear();
     this.host.remove();
   }
 
@@ -1622,14 +1894,6 @@ export class OverlayManager {
       this.transportSelect.appendChild(element);
     }
 
-    this.sourceTransferModeSelect.className = "mit-select";
-    for (const option of SOURCE_TRANSFER_MODE_OPTIONS) {
-      const element = document.createElement("option");
-      element.value = option.value;
-      element.textContent = option.label;
-      this.sourceTransferModeSelect.appendChild(element);
-    }
-
     this.autoCheckbox.type = "checkbox";
     this.cacheCheckbox.type = "checkbox";
     this.boxThresholdInput.type = "number";
@@ -1683,7 +1947,6 @@ export class OverlayManager {
     advancedGrid.className = "mit-settings-grid";
     advancedGrid.append(
       this.createField("上传方式", this.transportSelect),
-      this.createField("源图传输", this.sourceTransferModeSelect),
       this.createSwitchField("自动启动", this.autoCheckbox, "加载页面后自动开始扫描", true),
       this.createSwitchField("启用缓存", this.cacheCheckbox, "重复图片优先读取本地结果", true),
       this.createField("并发上限", this.concurrencyInput)
@@ -1724,10 +1987,13 @@ export class OverlayManager {
     footer.className = "mit-settings-actions";
     footer.dataset.visible = "false";
 
+    const clearCacheButton = this.createButton("清理缓存", "danger");
+    clearCacheButton.addEventListener("click", () => this.callbacks.onClearCache());
+
     const saveButton = this.createButton("保存设置", "primary");
     saveButton.addEventListener("click", () => this.saveSettings());
 
-    footer.append(saveButton);
+    footer.append(clearCacheButton, saveButton);
     return footer;
   }
 
@@ -1746,7 +2012,6 @@ export class OverlayManager {
       inpaintingSize: Number(this.inpaintingSizeInput.value),
       maskDilationOffset: Number(this.maskDilationOffsetInput.value),
       uploadTransport: this.transportSelect.value as UserscriptSettings["uploadTransport"],
-      sourceTransferMode: this.sourceTransferModeSelect.value as UserscriptSettings["sourceTransferMode"],
       autoTranslateEnabled: this.autoCheckbox.checked,
       cacheEnabled: this.cacheCheckbox.checked,
       maxConcurrency: Number(this.concurrencyInput.value),
@@ -1878,12 +2143,12 @@ export class OverlayManager {
   }
 
   private createOverlayItem(id: string): OverlayItemRefs {
-    const container = document.createElement("div");
-    container.className = "mit-overlay-item";
+    const host = document.createElement("div");
+    host.dataset.mitInlineStatus = id;
+    const itemShadowRoot = host.attachShadow({ mode: "open" });
 
-    const result = document.createElement("img");
-    result.className = "mit-overlay-image";
-    result.alt = "Translated manga overlay";
+    const style = document.createElement("style");
+    style.textContent = ITEM_STYLE_TEXT;
 
     const badge = document.createElement("div");
     badge.className = "mit-status-card";
@@ -1933,12 +2198,11 @@ export class OverlayManager {
     actions.append(toggle, retry, cancel, ignore);
     details.append(head, queue, actions);
     badge.append(compactToggle, details);
-    container.append(result, badge);
-    this.overlayLayer.appendChild(container);
+    itemShadowRoot.append(style, badge);
 
     const refs: OverlayItemRefs = {
-      container,
-      result,
+      host,
+      mountTarget: null,
       badge,
       compactToggle,
       details,
@@ -1951,6 +2215,81 @@ export class OverlayManager {
     };
     this.itemRefs.set(id, refs);
     return refs;
+  }
+
+  private resolveMountTarget(image: HTMLImageElement): HTMLElement | null {
+    const parent = image.parentElement;
+    if (!parent) {
+      return null;
+    }
+
+    if (parent instanceof HTMLPictureElement) {
+      return parent.parentElement ?? parent;
+    }
+
+    return parent;
+  }
+
+  private mountOverlayItem(refs: OverlayItemRefs, nextTarget: HTMLElement | null): void {
+    if (refs.mountTarget === nextTarget && (!nextTarget || refs.host.parentElement === nextTarget)) {
+      return;
+    }
+
+    if (refs.mountTarget) {
+      this.releaseMountTarget(refs.mountTarget);
+    }
+
+    refs.mountTarget = nextTarget;
+    if (!nextTarget) {
+      refs.host.remove();
+      return;
+    }
+
+    this.prepareMountTarget(nextTarget);
+    nextTarget.appendChild(refs.host);
+  }
+
+  private prepareMountTarget(target: HTMLElement): void {
+    const state = this.mountTargetStates.get(target);
+    if (state) {
+      state.refCount += 1;
+      return;
+    }
+
+    const computedPosition = window.getComputedStyle(target).position;
+    const originalPosition = target.style.position;
+    const appliedRelativePosition = computedPosition === "" || computedPosition === "static";
+    if (appliedRelativePosition) {
+      target.style.position = "relative";
+    }
+
+    this.mountTargetStates.set(target, {
+      refCount: 1,
+      originalPosition,
+      appliedRelativePosition
+    });
+  }
+
+  private releaseMountTarget(target: HTMLElement): void {
+    const state = this.mountTargetStates.get(target);
+    if (!state) {
+      return;
+    }
+
+    if (state.refCount > 1) {
+      state.refCount -= 1;
+      return;
+    }
+
+    if (state.appliedRelativePosition) {
+      if (state.originalPosition) {
+        target.style.position = state.originalPosition;
+      } else {
+        target.style.removeProperty("position");
+      }
+    }
+
+    this.mountTargetStates.delete(target);
   }
 
   private readonly handleViewportChange = (): void => {

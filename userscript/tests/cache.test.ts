@@ -4,6 +4,13 @@ import { DEFAULT_SETTINGS } from "../src/config";
 import type { TranslationCacheRecord, TranslationCacheStore } from "../src/cache";
 import { TranslationResultCache } from "../src/cache";
 
+const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+g5XsAAAAASUVORK5CYII=";
+const PNG_BYTES = Uint8Array.from(Buffer.from(PNG_BASE64, "base64"));
+
+function createPngBlob(type = "image/png"): Blob {
+  return new Blob([PNG_BYTES], { type });
+}
+
 class MemoryTranslationCacheStore implements TranslationCacheStore {
   private readonly records = new Map<string, TranslationCacheRecord>();
 
@@ -44,33 +51,51 @@ function createDigestMock(): (algorithm: AlgorithmIdentifier, data: BufferSource
   });
 }
 
-function readBlobText(blob: Blob): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
+async function readBlobBytes(blob: Blob): Promise<Uint8Array> {
+  return new Promise<Uint8Array>((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(reader.error ?? new Error("Failed to read the blob text."));
-    reader.readAsText(blob);
+    reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer));
+    reader.onerror = () => reject(reader.error ?? new Error("Failed to read the blob."));
+    reader.readAsArrayBuffer(blob);
   });
 }
 
 describe("TranslationResultCache", () => {
-  it("builds a stable key from image bytes and translation config", async () => {
+  it("builds a stable key from source URL, image bytes and translation config", async () => {
     const cache = new TranslationResultCache({
       digest: createDigestMock(),
       store: new MemoryTranslationCacheStore()
     });
 
     const baseSettings = DEFAULT_SETTINGS;
-    const baseKey = await cache.buildKey(new Blob(["page-a"]), baseSettings);
-    const sameKey = await cache.buildKey(new Blob(["page-a"]), baseSettings);
-    const otherImageKey = await cache.buildKey(new Blob(["page-bb"]), baseSettings);
-    const otherConfigKey = await cache.buildKey(new Blob(["page-a"]), {
+    const baseKey = await cache.buildKey(
+      new Blob(["page-a"]),
+      "https://cdn.example.com/manga/page-1.png#viewer",
+      baseSettings
+    );
+    const sameKey = await cache.buildKey(
+      new Blob(["page-a"]),
+      "https://cdn.example.com/manga/page-1.png",
+      baseSettings
+    );
+    const otherImageKey = await cache.buildKey(
+      new Blob(["page-bb"]),
+      "https://cdn.example.com/manga/page-1.png",
+      baseSettings
+    );
+    const otherSourceKey = await cache.buildKey(
+      new Blob(["page-a"]),
+      "https://cdn.example.com/manga/page-2.png",
+      baseSettings
+    );
+    const otherConfigKey = await cache.buildKey(new Blob(["page-a"]), "https://cdn.example.com/manga/page-1.png", {
       ...baseSettings,
       targetLanguage: "ENG"
     });
 
     expect(baseKey).toBe(sameKey);
     expect(baseKey).not.toBe(otherImageKey);
+    expect(baseKey).not.toBe(otherSourceKey);
     expect(baseKey).not.toBe(otherConfigKey);
   });
 
@@ -84,20 +109,75 @@ describe("TranslationResultCache", () => {
       store
     });
 
-    await cache.set("first", new Blob(["first-result"], { type: "image/png" }));
+    await cache.set("first", createPngBlob());
     now += 10;
-    await cache.set("second", new Blob(["second-result"], { type: "image/png" }));
+    await cache.set("second", createPngBlob());
 
     now += 10;
     const cachedFirst = await cache.get("first");
     expect(cachedFirst).toBeInstanceOf(Blob);
-    expect(await readBlobText(cachedFirst as Blob)).toBe("first-result");
+    expect(await readBlobBytes(cachedFirst as Blob)).toEqual(await readBlobBytes(createPngBlob()));
 
     now += 10;
-    await cache.set("third", new Blob(["third-result"], { type: "image/png" }));
+    await cache.set("third", createPngBlob());
 
     expect(await cache.get("first")).toBeInstanceOf(Blob);
     expect(await cache.get("second")).toBeNull();
     expect(await cache.get("third")).toBeInstanceOf(Blob);
+  });
+
+  it("repairs cached PNG blobs with a legacy MIME type", async () => {
+    const store = new MemoryTranslationCacheStore();
+    const cache = new TranslationResultCache({
+      digest: createDigestMock(),
+      store
+    });
+
+    await store.put({
+      key: "legacy",
+      blob: createPngBlob("application/octet-stream"),
+      createdAt: 1,
+      lastAccessedAt: 1,
+      byteSize: createPngBlob("application/octet-stream").size
+    });
+
+    const cachedBlob = await cache.get("legacy");
+
+    expect(cachedBlob).toBeInstanceOf(Blob);
+    expect((cachedBlob as Blob).type).toBe("image/png");
+    expect((await store.get("legacy"))?.blob.type).toBe("image/png");
+  });
+
+  it("drops invalid cached blobs instead of reusing them", async () => {
+    const store = new MemoryTranslationCacheStore();
+    const cache = new TranslationResultCache({
+      digest: createDigestMock(),
+      store
+    });
+
+    await store.put({
+      key: "broken",
+      blob: new Blob(["not-a-png"], { type: "application/octet-stream" }),
+      createdAt: 1,
+      lastAccessedAt: 1,
+      byteSize: "not-a-png".length
+    });
+
+    expect(await cache.get("broken")).toBeNull();
+    expect(await store.get("broken")).toBeNull();
+  });
+
+  it("clears all cached entries", async () => {
+    const store = new MemoryTranslationCacheStore();
+    const cache = new TranslationResultCache({
+      digest: createDigestMock(),
+      store
+    });
+
+    await cache.set("first", createPngBlob());
+    await cache.set("second", createPngBlob());
+
+    expect(await cache.clear()).toBe(true);
+    expect(await store.list()).toEqual([]);
   });
 });
