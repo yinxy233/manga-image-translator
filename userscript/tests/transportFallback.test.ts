@@ -30,6 +30,40 @@ function createStreamResponse(): ReadableStream<Uint8Array> {
 }
 
 describe("TransportClient", () => {
+  it("fetches cross-origin images without credentials to avoid wildcard ACAO conflicts", async () => {
+    const fetchImpl = vi.fn(async () => new Response(createPngBlob(), { status: 200 }));
+    const transport = new TransportClient({
+      fetchImpl,
+      gmRequest: vi.fn() as unknown as (details: GMRequestDetails<unknown>) => GMRequestHandle
+    });
+
+    const imageBlob = await transport.fetchImageBlob(
+      "https://zek6.mrawx.cyou/manga/example/01.webp"
+    );
+
+    const requestInit = (fetchImpl.mock.calls as unknown[][])[0]?.[1] as RequestInit | undefined;
+
+    expect(imageBlob).toBeInstanceOf(Blob);
+    expect(requestInit?.credentials).toBe("omit");
+  });
+
+  it("keeps same-origin image fetches on the browser credential policy", async () => {
+    const fetchImpl = vi.fn(async () => new Response(createPngBlob(), { status: 200 }));
+    const transport = new TransportClient({
+      fetchImpl,
+      gmRequest: vi.fn() as unknown as (details: GMRequestDetails<unknown>) => GMRequestHandle
+    });
+
+    const imageBlob = await transport.fetchImageBlob(
+      `${window.location.origin}/assets/page.png`
+    );
+
+    const requestInit = (fetchImpl.mock.calls as unknown[][])[0]?.[1] as RequestInit | undefined;
+
+    expect(imageBlob).toBeInstanceOf(Blob);
+    expect(requestInit?.credentials).toBe("same-origin");
+  });
+
   it("falls back to GM transport when fetch upload fails", async () => {
     const fetchImpl = vi.fn(async () => {
       throw new TypeError("Failed to fetch");

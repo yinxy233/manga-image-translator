@@ -12,6 +12,7 @@ import type {
   TranslationEvent,
   UserscriptSettings
 } from "../types";
+import { extractImageBlobFromElement } from "../utils/image";
 import { buildImageSignature } from "../utils/signature";
 import { HttpStatusError, TransportClient } from "../utils/transport";
 import { type DiscoveredImageCandidate, ImageDiscovery } from "./imageDiscovery";
@@ -28,6 +29,7 @@ import { type CancelReason, TaskQueue } from "./taskQueue";
 interface SharedImageTask {
   signature: string;
   sourceUrl: string;
+  sourceImage: HTMLImageElement | null;
   taskId: string;
   imageIds: Set<string>;
   resultUrl: string | null;
@@ -307,6 +309,7 @@ export class TranslatorController {
       shared = {
         signature,
         sourceUrl,
+        sourceImage: image,
         taskId: `mit-task-${signature}`,
         imageIds: new Set<string>(),
         resultUrl: null,
@@ -318,6 +321,10 @@ export class TranslatorController {
       };
       this.sharedTasks.set(signature, shared);
       this.enqueueSharedTask(shared);
+    }
+
+    if (!shared.sourceImage || !shared.sourceImage.isConnected) {
+      shared.sourceImage = image;
     }
 
     shared.imageIds.add(imageId);
@@ -340,7 +347,7 @@ export class TranslatorController {
 
     shared.activeTask = true;
     shared.status = "queued";
-    shared.message = "等待抓取原图";
+    shared.message = "等待读取原图";
     shared.queuePosition = null;
     shared.servedFromCache = false;
 
@@ -352,7 +359,7 @@ export class TranslatorController {
           return;
         }
         shared.status = "queued";
-        shared.message = "等待抓取原图";
+        shared.message = "等待读取原图";
         this.renderImages();
       },
       onStart: () => {
@@ -360,11 +367,11 @@ export class TranslatorController {
           return;
         }
         shared.status = "processing";
-        shared.message = "抓取原图";
+        shared.message = "读取原图";
         this.renderImages();
       },
       run: async (signal) => {
-        const sourceBlob = await this.transport.fetchImageBlob(shared.sourceUrl, signal);
+        const sourceBlob = await this.resolveSourceBlob(shared, signal);
         if (generation !== this.generation) {
           return;
         }
@@ -459,6 +466,18 @@ export class TranslatorController {
         this.renderImages();
       }
     });
+  }
+
+  private async resolveSourceBlob(shared: SharedImageTask, signal?: AbortSignal): Promise<Blob> {
+    if (shared.sourceImage?.isConnected) {
+      // 对已显示在页面上的图片优先复用浏览器内存中的像素，避免某些图床对脚本二次拉图返回 403。
+      const sourceBlob = await extractImageBlobFromElement(shared.sourceImage);
+      if (sourceBlob) {
+        return sourceBlob;
+      }
+    }
+
+    return this.transport.fetchImageBlob(shared.sourceUrl, signal);
   }
 
   private handleTranslationEvent(
@@ -604,6 +623,7 @@ export class TranslatorController {
     this.adapterDomTweaksCleanup = this.installAdapterDomTweaks(activeAdapters);
     this.discovery = new ImageDiscovery({
       adapters: activeAdapters,
+      eagerScanEnabled: this.settings.fullPageTranslateEnabled,
       onImageEligible: (candidate) => this.handleDiscoveredImage(candidate)
     });
     this.discovery.start();

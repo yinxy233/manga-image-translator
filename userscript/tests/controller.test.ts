@@ -3,6 +3,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { INITIAL_AUTO_TRANSLATE_SCAN_DELAY_MS } from "../src/config";
 import { getManagedImageSourceUrl } from "../src/utils/image";
 
+const {
+  mockExtractImageBlobFromElement,
+  mockFetchImageBlob,
+  mockTranslateImage,
+  mockCheckHealth
+} = vi.hoisted(() => ({
+  mockExtractImageBlobFromElement: vi.fn(),
+  mockFetchImageBlob: vi.fn(),
+  mockTranslateImage: vi.fn(),
+  mockCheckHealth: vi.fn()
+}));
+
 vi.mock("../src/storage", async () => {
   const { DEFAULT_SETTINGS } = await vi.importActual<typeof import("../src/config")>(
     "../src/config"
@@ -26,14 +38,25 @@ vi.mock("../src/cache", () => ({
   }
 }));
 
+vi.mock("../src/utils/image", async () => {
+  const actual = await vi.importActual<typeof import("../src/utils/image")>(
+    "../src/utils/image"
+  );
+
+  return {
+    ...actual,
+    extractImageBlobFromElement: mockExtractImageBlobFromElement
+  };
+});
+
 vi.mock("../src/utils/transport", () => ({
   HttpStatusError: class extends Error {
     status = 500;
   },
   TransportClient: class {
-    fetchImageBlob = vi.fn();
-    translateImage = vi.fn();
-    checkHealth = vi.fn();
+    fetchImageBlob = mockFetchImageBlob;
+    translateImage = mockTranslateImage;
+    checkHealth = mockCheckHealth;
   }
 }));
 
@@ -94,11 +117,21 @@ import { TranslatorController } from "../src/core/controller";
 interface ControllerInternals {
   discovery: InstanceType<typeof MockImageDiscovery> | null;
   discoveryReady: boolean;
+  transport: {
+    fetchImageBlob: typeof mockFetchImageBlob;
+  };
   handleDiscoveredImage(candidate: {
     image: HTMLImageElement;
     sourceUrl: string;
     adapterId: string;
   }): void;
+  resolveSourceBlob(
+    shared: {
+      sourceUrl: string;
+      sourceImage: HTMLImageElement | null;
+    },
+    signal?: AbortSignal
+  ): Promise<Blob>;
   imageEntries: Map<
     string,
     {
@@ -131,6 +164,10 @@ describe("TranslatorController image presentation", () => {
   beforeEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+    mockExtractImageBlobFromElement.mockReset();
+    mockFetchImageBlob.mockReset();
+    mockTranslateImage.mockReset();
+    mockCheckHealth.mockReset();
     document.body.innerHTML = "";
     if (typeof URL.revokeObjectURL !== "function") {
       Object.defineProperty(URL, "revokeObjectURL", {
@@ -210,5 +247,43 @@ describe("TranslatorController image presentation", () => {
 
     expect(discovery?.reset).toHaveBeenCalledTimes(1);
     expect(discovery?.rescan).toHaveBeenCalledTimes(1);
+  });
+
+  it("prefers already rendered image pixels before falling back to network fetch", async () => {
+    const expectedBlob = new Blob(["page"], { type: "image/png" });
+    const controller = asControllerInternals(new TranslatorController());
+    const image = createImage("https://example.com/original.png");
+
+    mockExtractImageBlobFromElement.mockResolvedValue(expectedBlob);
+
+    const sourceBlob = await controller.resolveSourceBlob({
+      sourceUrl: "https://example.com/original.png",
+      sourceImage: image
+    });
+
+    expect(sourceBlob).toBe(expectedBlob);
+    expect(mockExtractImageBlobFromElement).toHaveBeenCalledWith(image);
+    expect(controller.transport.fetchImageBlob).not.toHaveBeenCalled();
+  });
+
+  it("falls back to network fetch when DOM pixel extraction is unavailable", async () => {
+    const expectedBlob = new Blob(["fallback"], { type: "image/png" });
+    const controller = asControllerInternals(new TranslatorController());
+    const image = createImage("https://example.com/original.png");
+
+    mockExtractImageBlobFromElement.mockResolvedValue(null);
+    mockFetchImageBlob.mockResolvedValue(expectedBlob);
+
+    const sourceBlob = await controller.resolveSourceBlob({
+      sourceUrl: "https://example.com/original.png",
+      sourceImage: image
+    });
+
+    expect(sourceBlob).toBe(expectedBlob);
+    expect(mockExtractImageBlobFromElement).toHaveBeenCalledWith(image);
+    expect(controller.transport.fetchImageBlob).toHaveBeenCalledWith(
+      "https://example.com/original.png",
+      undefined
+    );
   });
 });

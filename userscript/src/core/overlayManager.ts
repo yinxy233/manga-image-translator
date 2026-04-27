@@ -1394,6 +1394,8 @@ export class OverlayManager {
 
   private readonly autoCheckbox: HTMLInputElement;
 
+  private readonly fullPageCheckbox: HTMLInputElement;
+
   private readonly cacheCheckbox: HTMLInputElement;
 
   private readonly concurrencyInput: HTMLInputElement;
@@ -1492,6 +1494,7 @@ export class OverlayManager {
     this.maskDilationOffsetInput = document.createElement("input");
     this.transportSelect = document.createElement("select");
     this.autoCheckbox = document.createElement("input");
+    this.fullPageCheckbox = document.createElement("input");
     this.cacheCheckbox = document.createElement("input");
     this.concurrencyInput = document.createElement("input");
     this.adapterList = document.createElement("div");
@@ -1548,6 +1551,7 @@ export class OverlayManager {
     this.maskDilationOffsetInput.value = String(settings.maskDilationOffset);
     this.transportSelect.value = settings.uploadTransport;
     this.autoCheckbox.checked = settings.autoTranslateEnabled;
+    this.fullPageCheckbox.checked = settings.fullPageTranslateEnabled;
     this.cacheCheckbox.checked = settings.cacheEnabled;
     this.concurrencyInput.value = String(settings.maxConcurrency);
     this.launcherPosition = settings.launcherPosition;
@@ -1895,6 +1899,7 @@ export class OverlayManager {
     }
 
     this.autoCheckbox.type = "checkbox";
+    this.fullPageCheckbox.type = "checkbox";
     this.cacheCheckbox.type = "checkbox";
     this.boxThresholdInput.type = "number";
     this.boxThresholdInput.min = String(MIN_BOX_THRESHOLD);
@@ -1948,6 +1953,12 @@ export class OverlayManager {
     advancedGrid.append(
       this.createField("上传方式", this.transportSelect),
       this.createSwitchField("自动启动", this.autoCheckbox, "加载页面后自动开始扫描", true),
+      this.createSwitchField(
+        "整页翻译",
+        this.fullPageCheckbox,
+        "启动后立即扫描并排队当前页全部图片",
+        true
+      ),
       this.createSwitchField("启用缓存", this.cacheCheckbox, "重复图片优先读取本地结果", true),
       this.createField("并发上限", this.concurrencyInput)
     );
@@ -2013,6 +2024,7 @@ export class OverlayManager {
       maskDilationOffset: Number(this.maskDilationOffsetInput.value),
       uploadTransport: this.transportSelect.value as UserscriptSettings["uploadTransport"],
       autoTranslateEnabled: this.autoCheckbox.checked,
+      fullPageTranslateEnabled: this.fullPageCheckbox.checked,
       cacheEnabled: this.cacheCheckbox.checked,
       maxConcurrency: Number(this.concurrencyInput.value),
       launcherPosition: this.launcherPosition,

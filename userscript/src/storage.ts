@@ -106,6 +106,9 @@ export function sanitizeSettings(settings: Partial<UserscriptSettings>): Userscr
     maskDilationOffset,
     uploadTransport,
     autoTranslateEnabled: Boolean(settings.autoTranslateEnabled ?? DEFAULT_SETTINGS.autoTranslateEnabled),
+    fullPageTranslateEnabled: Boolean(
+      settings.fullPageTranslateEnabled ?? DEFAULT_SETTINGS.fullPageTranslateEnabled
+    ),
     cacheEnabled: Boolean(settings.cacheEnabled ?? DEFAULT_SETTINGS.cacheEnabled),
     maxConcurrency,
     launcherPosition,

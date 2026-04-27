@@ -16,6 +16,7 @@ export interface DiscoveredImageCandidate {
 export interface ImageDiscoveryOptions {
   adapters: ReadonlyArray<SiteAdapterDefinition>;
   onImageEligible: (candidate: DiscoveredImageCandidate) => void;
+  eagerScanEnabled?: boolean;
 }
 
 export function isEligibleRasterImage(image: HTMLImageElement, sourceUrl: string): boolean {
@@ -66,11 +67,14 @@ export class ImageDiscovery {
 
   private readonly onImageEligible: (candidate: DiscoveredImageCandidate) => void;
 
+  private readonly eagerScanEnabled: boolean;
+
   private adapterRoots = new Map<string, Element[]>();
 
   constructor(options: ImageDiscoveryOptions) {
     this.adapters = options.adapters;
     this.onImageEligible = options.onImageEligible;
+    this.eagerScanEnabled = Boolean(options.eagerScanEnabled);
 
     this.intersectionObserver = new IntersectionObserver(
       (entries) => {
@@ -79,32 +83,7 @@ export class ImageDiscovery {
           if (!(image instanceof HTMLImageElement) || !entry.isIntersecting) {
             continue;
           }
-
-          const adapter = this.resolveAdapterForImage(image);
-          if (!adapter) {
-            continue;
-          }
-
-          const sourceUrl = adapter.resolveImageSource(image);
-          if (!sourceUrl) {
-            continue;
-          }
-
-          const processedKey = `${adapter.id}|${sourceUrl}`;
-          if (this.processedSources.get(image) === processedKey) {
-            continue;
-          }
-
-          if (!isEligibleRasterImage(image, sourceUrl)) {
-            continue;
-          }
-
-          this.processedSources.set(image, processedKey);
-          this.onImageEligible({
-            image,
-            sourceUrl,
-            adapterId: adapter.id
-          });
+          this.processEligibleImage(image);
         }
       },
       {
@@ -182,7 +161,21 @@ export class ImageDiscovery {
   }
 
   private maybeObserveImage(image: HTMLImageElement): void {
-    if (!this.resolveAdapterForImage(image)) {
+    const adapter = this.resolveAdapterForImage(image);
+    if (!adapter) {
+      return;
+    }
+
+    if (this.eagerScanEnabled) {
+      if (!image.complete) {
+        // 整页模式要求在图片一加载完成就立即入队，避免用户必须滚动到目标区域才触发翻译。
+        image.addEventListener("load", () => this.processEligibleImage(image), {
+          once: true
+        });
+        return;
+      }
+
+      this.processEligibleImage(image, adapter);
       return;
     }
 
@@ -199,6 +192,37 @@ export class ImageDiscovery {
       });
     }
     this.intersectionObserver.observe(image);
+  }
+
+  private processEligibleImage(
+    image: HTMLImageElement,
+    adapterOverride?: SiteAdapterDefinition
+  ): void {
+    const adapter = adapterOverride ?? this.resolveAdapterForImage(image);
+    if (!adapter) {
+      return;
+    }
+
+    const sourceUrl = adapter.resolveImageSource(image);
+    if (!sourceUrl) {
+      return;
+    }
+
+    const processedKey = `${adapter.id}|${sourceUrl}`;
+    if (this.processedSources.get(image) === processedKey) {
+      return;
+    }
+
+    if (!isEligibleRasterImage(image, sourceUrl)) {
+      return;
+    }
+
+    this.processedSources.set(image, processedKey);
+    this.onImageEligible({
+      image,
+      sourceUrl,
+      adapterId: adapter.id
+    });
   }
 
   private resolveAdapterForImage(image: HTMLImageElement): SiteAdapterDefinition | null {

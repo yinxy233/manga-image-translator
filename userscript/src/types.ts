@@ -53,6 +53,7 @@ export interface UserscriptSettings {
   maskDilationOffset: number;
   uploadTransport: UploadTransport;
   autoTranslateEnabled: boolean;
+  fullPageTranslateEnabled: boolean;
   cacheEnabled: boolean;
   maxConcurrency: number;
   launcherPosition: LauncherPosition | null;

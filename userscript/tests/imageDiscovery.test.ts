@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { manhwaRawSiteAdapter } from "../src/adapters/manhwaRaw";
 import type { SiteAdapterDefinition } from "../src/adapters/types";
@@ -36,6 +36,11 @@ class FakeIntersectionObserver {
 }
 
 describe("ImageDiscovery", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+    FakeIntersectionObserver.instance = null;
+  });
+
   it("only emits images inside active adapter roots", () => {
     vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
     const eligible = vi.fn();
@@ -156,6 +161,40 @@ describe("ImageDiscovery", () => {
 
     expect(FakeIntersectionObserver.instance?.unobserve).toHaveBeenCalledWith(image);
     expect(FakeIntersectionObserver.instance?.observe).toHaveBeenCalledWith(image);
+    discovery.stop();
+  });
+
+  it("can emit all eligible images immediately when full-page scanning is enabled", () => {
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+    const eligible = vi.fn();
+
+    const image = document.createElement("img");
+    Object.defineProperty(image, "complete", { value: true });
+    Object.defineProperty(image, "naturalWidth", { value: 1200 });
+    Object.defineProperty(image, "naturalHeight", { value: 1800 });
+    Object.defineProperty(image, "currentSrc", { value: "https://example.com/page-3.jpg" });
+    image.getBoundingClientRect = () =>
+      ({
+        width: 480,
+        height: 720
+      }) as DOMRect;
+
+    document.body.append(image);
+
+    const discovery = new ImageDiscovery({
+      adapters: [createAdapter({ id: "reader", label: "Reader", getRootSelectors: () => ["body"] })],
+      eagerScanEnabled: true,
+      onImageEligible: eligible
+    });
+    discovery.start();
+
+    expect(eligible).toHaveBeenCalledTimes(1);
+    expect(eligible).toHaveBeenCalledWith({
+      image,
+      sourceUrl: "https://example.com/page-3.jpg",
+      adapterId: "reader"
+    });
+    expect(FakeIntersectionObserver.instance?.observe).not.toHaveBeenCalled();
     discovery.stop();
   });
 

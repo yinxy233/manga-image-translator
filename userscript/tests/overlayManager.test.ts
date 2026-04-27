@@ -218,6 +218,7 @@ describe("OverlayManager", () => {
         "遮罩膨胀",
         "上传方式",
         "自动启动",
+        "整页翻译",
         "启用缓存",
         "并发上限"
       ])
@@ -237,9 +238,12 @@ describe("OverlayManager", () => {
 
     const serverInput = overlay.shadowRoot.querySelector('input[placeholder="https://translator.example.com"]') as HTMLInputElement;
     const apiKeyInput = overlay.shadowRoot.querySelector('input[placeholder="可选接口密钥"]') as HTMLInputElement;
-    const cacheCheckbox = Array.from(
+    const fullPageCheckbox = Array.from(
       overlay.shadowRoot.querySelectorAll('.mit-switch input[type="checkbox"]')
     )[1] as HTMLInputElement;
+    const cacheCheckbox = Array.from(
+      overlay.shadowRoot.querySelectorAll('.mit-switch input[type="checkbox"]')
+    )[2] as HTMLInputElement;
     const concurrencyInput = overlay.shadowRoot.querySelector(
       'input[type="number"][min="1"][max="6"]'
     ) as HTMLInputElement;
@@ -259,10 +263,12 @@ describe("OverlayManager", () => {
     expect(apiKeyInput.type).toBe("text");
     expect(apiKeyInput.autocomplete).toBe("off");
     expect(apiKeyInput.getAttribute("data-lpignore")).toBe("true");
+    expect(fullPageCheckbox.checked).toBe(false);
     expect(cacheCheckbox.checked).toBe(true);
     expect(adapterStatuses).toEqual(["当前页生效", "已启用"]);
 
     serverInput.value = " https://translator.internal ";
+    fullPageCheckbox.checked = true;
     cacheCheckbox.checked = false;
     concurrencyInput.value = "4";
     adapterCheckboxes[0]!.checked = false;
@@ -273,6 +279,7 @@ describe("OverlayManager", () => {
     expect(onSaveSettings).toHaveBeenCalledWith(
       expect.objectContaining({
         serverBaseUrl: "https://translator.internal",
+        fullPageTranslateEnabled: true,
         cacheEnabled: false,
         maxConcurrency: 4,
         adapterOverrides: {

@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   clearManagedImageSourceUrl,
+  extractImageBlobFromElement,
   getManagedImageSourceUrl,
   normalizeRenderedImageBlob,
   resolveDefaultImageSource,
@@ -14,6 +15,94 @@ const PNG_BYTES = Uint8Array.from(Buffer.from(PNG_BASE64, "base64"));
 function createPngBlob(type = "image/png"): Blob {
   return new Blob([PNG_BYTES], { type });
 }
+
+describe("extractImageBlobFromElement", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("reuses already rendered image pixels when canvas export succeeds", async () => {
+    const image = document.createElement("img");
+    const expectedBlob = createPngBlob();
+    Object.defineProperties(image, {
+      complete: {
+        configurable: true,
+        value: true
+      },
+      naturalWidth: {
+        configurable: true,
+        value: 800
+      },
+      naturalHeight: {
+        configurable: true,
+        value: 1200
+      }
+    });
+
+    const drawImage = vi.fn();
+    const getContext = vi.fn(() => ({ drawImage }));
+    const toBlob = vi.fn((callback: BlobCallback) => callback(expectedBlob));
+    const originalCreateElement = document.createElement.bind(document);
+    const createElement = vi.spyOn(document, "createElement");
+    createElement.mockImplementation(((tagName: string) => {
+      if (tagName === "canvas") {
+        return {
+          width: 0,
+          height: 0,
+          getContext,
+          toBlob
+        } as unknown as HTMLCanvasElement;
+      }
+
+      return originalCreateElement(tagName);
+    }) as typeof document.createElement);
+
+    const sourceBlob = await extractImageBlobFromElement(image);
+
+    expect(sourceBlob).toBe(expectedBlob);
+    expect(drawImage).toHaveBeenCalledWith(image, 0, 0, 800, 1200);
+    expect(toBlob).toHaveBeenCalledOnce();
+  });
+
+  it("returns null when canvas extraction is blocked by cross-origin restrictions", async () => {
+    const image = document.createElement("img");
+    Object.defineProperties(image, {
+      complete: {
+        configurable: true,
+        value: true
+      },
+      naturalWidth: {
+        configurable: true,
+        value: 800
+      },
+      naturalHeight: {
+        configurable: true,
+        value: 1200
+      }
+    });
+
+    const originalCreateElement = document.createElement.bind(document);
+    const createElement = vi.spyOn(document, "createElement");
+    createElement.mockImplementation(((tagName: string) => {
+      if (tagName === "canvas") {
+        return {
+          width: 0,
+          height: 0,
+          getContext: () => ({
+            drawImage: () => {
+              throw new DOMException("The operation is insecure.", "SecurityError");
+            }
+          }),
+          toBlob: vi.fn()
+        } as unknown as HTMLCanvasElement;
+      }
+
+      return originalCreateElement(tagName);
+    }) as typeof document.createElement);
+
+    await expect(extractImageBlobFromElement(image)).resolves.toBeNull();
+  });
+});
 
 describe("normalizeRenderedImageBlob", () => {
   it("keeps valid PNG blobs renderable", async () => {

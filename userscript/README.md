@@ -25,6 +25,23 @@ pnpm build
 
 构建完成后，产物会出现在 `userscript/dist/`，将其中的 `.user.js` 文件导入 Tampermonkey 即可。
 
+如果希望打包后的脚本只在指定页面生效，请在构建前设置 `USERSCRIPT_MATCH`。这个变量会直接生成 userscript 头部的 `@match`，因此必须在打包时确定：
+
+```bash
+cd userscript
+USERSCRIPT_MATCH="https://example.com/comic/episode-1" pnpm build
+```
+
+多个页面或模式可使用逗号或换行分隔：
+
+```bash
+cd userscript
+USERSCRIPT_MATCH="https://example.com/comic/episode-1,https://reader.example.org/chapter/*" pnpm build
+```
+
+- 未设置 `USERSCRIPT_MATCH` 时，默认保持 `*://*/*`，兼容当前“任意图片站点”模式。
+- 如果只希望某个固定章节页生效，填写完整 URL；如果希望某类页面生效，填写 Tampermonkey 支持的通配模式。
+
 ## Versioning
 
 推荐使用语义化版本（SemVer）发版，而不是每次 `build` 自动递增版本号。

@@ -66,6 +66,20 @@ function joinServerUrl(baseUrl: string, path: string): string {
   return new URL(path, `${baseUrl.replace(/\/+$/, "")}/`).toString();
 }
 
+function resolveImageFetchCredentials(imageUrl: string): RequestCredentials {
+  try {
+    const resolvedUrl = new URL(imageUrl, window.location.href);
+    if (resolvedUrl.origin === window.location.origin) {
+      return "same-origin";
+    }
+  } catch {
+    return "same-origin";
+  }
+
+  // 某些图床允许跨域匿名读取，但会拒绝带 Cookie 的脚本抓取；跨域图默认去掉凭据，避免触发 ACAO=* 与凭据模式冲突。
+  return "omit";
+}
+
 function buildHeaders(settings: UserscriptSettings): Record<string, string> {
   if (!settings.apiKey.trim()) {
     return {};
@@ -316,7 +330,7 @@ export class TransportClient {
     try {
       const response = await this.fetchImpl(imageUrl, {
         method: "GET",
-        credentials: "include",
+        credentials: resolveImageFetchCredentials(imageUrl),
         signal
       });
       if (!response.ok) {
