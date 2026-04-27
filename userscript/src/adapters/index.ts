@@ -1,8 +1,12 @@
 import { genericSiteAdapter } from "./generic";
+import { manhwaRawSiteAdapter } from "./manhwaRaw";
 import { mamekichimamekoSiteAdapter } from "./mamekichimameko";
 import type { LocationLike, SiteAdapterDefinition, SiteAdapterState } from "./types";
 
-const SITE_SPECIFIC_ADAPTERS: ReadonlyArray<SiteAdapterDefinition> = [mamekichimamekoSiteAdapter];
+const SITE_SPECIFIC_ADAPTERS: ReadonlyArray<SiteAdapterDefinition> = [
+  mamekichimamekoSiteAdapter,
+  manhwaRawSiteAdapter
+];
 const ALL_SITE_ADAPTERS: ReadonlyArray<SiteAdapterDefinition> = [...SITE_SPECIFIC_ADAPTERS, genericSiteAdapter];
 
 function isAdapterId(value: string): boolean {

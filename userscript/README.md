@@ -195,7 +195,7 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - 油猴脚本是独立工程，不复用 `front/` 运行时。
 - 当前版本只面向桌面 Tampermonkey，不覆盖移动端浏览器。
 - 会默认缓存已完成的翻译结果；如果站点图片经常变化或你不希望复用旧结果，可以在设置里关闭缓存。
-- 当前版本支持 `generic` 通用兜底适配器和站点特化适配器，首个内置站点为 `mamekichimameko.blog.jp`。
+- 当前版本支持 `generic` 通用兜底适配器和站点特化适配器，内置站点包括 `mamekichimameko.blog.jp` 与 `manhwa-raw.com`。
 - 新增站点适配器时，最少需要：
   - 在 `src/adapters/` 注册 `SiteAdapterDefinition`
   - 声明正文 root selectors

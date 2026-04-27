@@ -21,6 +21,7 @@ describe("sanitizeSettings", () => {
     expect(settings.maxConcurrency).toBe(3);
     expect(settings.cacheEnabled).toBe(false);
     expect(settings.adapterOverrides).toEqual({
+      ...DEFAULT_SETTINGS.adapterOverrides,
       generic: true,
       mamekichimameko: false
     });
@@ -129,6 +130,7 @@ describe("sanitizeSettings", () => {
     });
 
     expect(settings.adapterOverrides).toEqual({
+      ...DEFAULT_SETTINGS.adapterOverrides,
       generic: false,
       mamekichimameko: true
     });
