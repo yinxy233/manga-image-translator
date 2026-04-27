@@ -1,0 +1,1 @@
+uv run python server/main.py --host 0.0.0.0 --port 8001 --verbose --nonce None --use-gpu --instances 2 --api-key "lvkay" 
