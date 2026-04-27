@@ -254,6 +254,12 @@ describe("OverlayManager", () => {
       overlay.shadowRoot.querySelectorAll(".mit-adapter-status"),
       (node) => node.textContent
     );
+    const visibleAdapterTitles = Array.from(
+      overlay.shadowRoot.querySelectorAll(".mit-adapter-card"),
+      (node) => node as HTMLDivElement
+    )
+      .filter((node) => !node.hidden)
+      .map((node) => node.querySelector(".mit-adapter-title")?.textContent);
     const footerButtons = Array.from(settingsFooter.querySelectorAll(".mit-btn")) as HTMLButtonElement[];
     const clearButton = footerButtons.find((button) => button.textContent === "清理缓存") as HTMLButtonElement;
     const saveButton = footerButtons.find((button) => button.textContent === "保存设置") as HTMLButtonElement;
@@ -266,6 +272,7 @@ describe("OverlayManager", () => {
     expect(fullPageCheckbox.checked).toBe(false);
     expect(cacheCheckbox.checked).toBe(true);
     expect(adapterStatuses).toEqual(["当前页生效", "已启用"]);
+    expect(visibleAdapterTitles).toEqual(["まめきちまめこ"]);
 
     serverInput.value = " https://translator.internal ";
     fullPageCheckbox.checked = true;

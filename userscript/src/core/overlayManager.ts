@@ -1575,6 +1575,8 @@ export class OverlayManager {
       row.status.dataset.tone = deriveAdapterTone(adapterState);
       row.status.textContent = deriveAdapterStatus(adapterState);
       row.meta.textContent = `${adapterState.domainLabel} · ${adapterState.description}`;
+      // 这里隐藏而不销毁非当前站点适配器，避免保存设置时把其他站点的开关重置回默认值。
+      row.container.hidden = !adapterState.matched;
     }
   }
 
