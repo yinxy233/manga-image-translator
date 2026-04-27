@@ -1402,6 +1402,8 @@ export class OverlayManager {
 
   private readonly adapterList: HTMLDivElement;
 
+  private adapterSection: HTMLDivElement | null = null;
+
   private readonly adapterRows = new Map<
     string,
     {
@@ -1576,7 +1578,16 @@ export class OverlayManager {
       row.status.textContent = deriveAdapterStatus(adapterState);
       row.meta.textContent = `${adapterState.domainLabel} · ${adapterState.description}`;
       // 这里隐藏而不销毁非当前站点适配器，避免保存设置时把其他站点的开关重置回默认值。
-      row.container.hidden = !adapterState.matched;
+      // 同时显式写入 display，是因为组件样式会覆盖 hidden 的默认展示行为。
+      const visible = this.shouldDisplayAdapter(adapterState);
+      row.container.hidden = !visible;
+      row.container.style.display = visible ? "" : "none";
+    }
+
+    if (this.adapterSection) {
+      const visible = adapterStates.some((adapterState) => this.shouldDisplayAdapter(adapterState));
+      this.adapterSection.hidden = !visible;
+      this.adapterSection.style.display = visible ? "" : "none";
     }
   }
 
@@ -1968,6 +1979,11 @@ export class OverlayManager {
     this.adapterList.className = "mit-adapter-list";
     this.updateAdapterStates(adapterStates);
 
+    this.adapterSection = this.createSettingsSection({
+      title: "站点适配器",
+      content: this.adapterList
+    });
+
     panel.append(
       this.createSettingsSection({
         title: "连接",
@@ -1985,10 +2001,7 @@ export class OverlayManager {
         title: "高级",
         content: advancedGrid
       }),
-      this.createSettingsSection({
-        title: "站点适配器",
-        content: this.adapterList
-      })
+      this.adapterSection
     );
 
     this.updateSettings(settings);
@@ -2154,6 +2167,10 @@ export class OverlayManager {
     const row = { container, checkbox, status, meta };
     this.adapterRows.set(adapterState.id, row);
     return row;
+  }
+
+  private shouldDisplayAdapter(adapterState: SiteAdapterState): boolean {
+    return adapterState.matched && adapterState.id !== "generic";
   }
 
   private createOverlayItem(id: string): OverlayItemRefs {

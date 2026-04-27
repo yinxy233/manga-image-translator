@@ -47,9 +47,10 @@ const TEST_ADAPTER_STATES: SiteAdapterState[] = [
 ];
 
 function createOverlay(
-  callbackOverrides: Partial<OverlayManagerCallbacks> = {}
+  callbackOverrides: Partial<OverlayManagerCallbacks> = {},
+  adapterStates: SiteAdapterState[] = TEST_ADAPTER_STATES
 ): OverlayManager {
-  return new OverlayManager(DEFAULT_SETTINGS, TEST_ADAPTER_STATES, {
+  return new OverlayManager(DEFAULT_SETTINGS, adapterStates, {
     onTranslateNow: vi.fn(),
     onLauncherPositionChange: vi.fn(),
     onToggleSession: vi.fn(),
@@ -273,6 +274,11 @@ describe("OverlayManager", () => {
     expect(cacheCheckbox.checked).toBe(true);
     expect(adapterStatuses).toEqual(["当前页生效", "已启用"]);
     expect(visibleAdapterTitles).toEqual(["まめきちまめこ"]);
+    expect(
+      Array.from(overlay.shadowRoot.querySelectorAll(".mit-adapter-card"))
+        .filter((node) => (node as HTMLDivElement).hidden)
+        .every((node) => (node as HTMLDivElement).style.display === "none")
+    ).toBe(true);
 
     serverInput.value = " https://translator.internal ";
     fullPageCheckbox.checked = true;
@@ -307,6 +313,44 @@ describe("OverlayManager", () => {
     expect(styleText).toContain(
       "width: min(312px, calc(100vw - 24px - env(safe-area-inset-left) - env(safe-area-inset-right)));"
     );
+
+    overlay.destroy();
+  });
+
+  it("hides the adapter section when the page only uses the generic fallback", () => {
+    const overlay = createOverlay(
+      {},
+      [
+        {
+          id: "mamekichimameko",
+          label: "まめきちまめこ",
+          description: "文章正文容器内的漫画图与文末告知图。",
+          domainLabel: "mamekichimameko.blog.jp",
+          defaultEnabled: true,
+          enabled: true,
+          matched: false,
+          active: false
+        },
+        {
+          id: "generic",
+          label: "通用兜底",
+          description: "未知站点或未覆盖模板时，按全站可见图片规则兜底处理。",
+          domainLabel: "*://*/*",
+          defaultEnabled: true,
+          enabled: true,
+          matched: true,
+          active: true
+        }
+      ]
+    );
+
+    const adapterSections = Array.from(
+      overlay.shadowRoot.querySelectorAll(".mit-settings-section")
+    ) as HTMLDivElement[];
+    const adapterSection = adapterSections[4];
+
+    expect(adapterSection?.hidden).toBe(true);
+    expect(adapterSection?.style.display).toBe("none");
 
     overlay.destroy();
   });
