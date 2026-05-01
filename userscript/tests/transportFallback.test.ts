@@ -29,6 +29,19 @@ function createStreamResponse(): ReadableStream<Uint8Array> {
   });
 }
 
+function createFastPathStreamResponse(folderName: string): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const progressFrame = createFrame(1, encoder.encode(`final_ready:${folderName}`));
+  const placeholderFrame = createFrame(0, PNG_BYTES);
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(progressFrame);
+      controller.enqueue(placeholderFrame);
+      controller.close();
+    }
+  });
+}
+
 describe("TransportClient", () => {
   it("fetches cross-origin images without credentials to avoid wildcard ACAO conflicts", async () => {
     const fetchImpl = vi.fn(async () => new Response(createPngBlob(), { status: 200 }));
@@ -216,6 +229,46 @@ describe("TransportClient", () => {
       inpainting_size: 1536
     });
     expect(body.config.mask_dilation_offset).toBe(18);
+    expect(gmRequest).not.toHaveBeenCalled();
+  });
+
+  it("loads the web fast-path final image after final_ready progress", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/result/")) {
+        return new Response(PNG_BYTES, {
+          status: 200,
+          headers: { "Content-Type": "image/png" }
+        });
+      }
+      return new Response(createFastPathStreamResponse("folder 1"), { status: 200 });
+    });
+    const gmRequest = vi.fn();
+    const onEvent = vi.fn();
+
+    const transport = new TransportClient({
+      fetchImpl,
+      gmRequest: gmRequest as unknown as (details: GMRequestDetails<unknown>) => GMRequestHandle
+    });
+
+    const result = await transport.translateImage({
+      imageBlob: new Blob(["test-image"], { type: "image/png" }),
+      fileName: "page.png",
+      settings: DEFAULT_SETTINGS,
+      onEvent
+    });
+
+    const requestUrls = fetchImpl.mock.calls.map((call) => String(call[0]));
+
+    expect(result).toBeInstanceOf(Blob);
+    expect(result.size).toBe(PNG_BYTES.length);
+    expect(requestUrls[0]).toContain("/translate/with-form/image/stream/web");
+    expect(requestUrls[1]).toContain("/result/folder%201/final.png");
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    expect(onEvent.mock.calls[0]?.[0]).toMatchObject({
+      code: 1,
+      text: "final_ready:folder 1"
+    });
     expect(gmRequest).not.toHaveBeenCalled();
   });
 

@@ -260,10 +260,12 @@ async function normalizeTranslationResponseBlob(blob: Blob): Promise<Blob> {
 async function parseTranslationStream(
   stream: ReadableStream<Uint8Array>,
   onEvent: (event: TranslationEvent) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  resolveFinalReadyBlob?: (folderName: string) => Promise<Blob>
 ): Promise<Blob> {
   const parser = new StreamFrameParser();
   let resultBlob: Blob | null = null;
+  let finalReadyFolder: string | null = null;
 
   await readReadableStream(
     stream,
@@ -280,6 +282,13 @@ async function parseTranslationStream(
           throw new Error(text || "Translation failed");
         }
 
+        if (frame.code === 1 && text.startsWith("final_ready:")) {
+          const folderName = text.slice("final_ready:".length).trim();
+          if (folderName) {
+            finalReadyFolder = folderName;
+          }
+        }
+
         onEvent({
           code: frame.code,
           payload: frame.data,
@@ -289,6 +298,11 @@ async function parseTranslationStream(
     },
     signal
   );
+
+  if (finalReadyFolder && resolveFinalReadyBlob) {
+    // Web 快路径的最终帧只是 1x1 占位图；收到 final_ready 后必须直接读取后端已落盘的 final.png。
+    return resolveFinalReadyBlob(finalReadyFolder);
+  }
 
   if (!resultBlob) {
     throw new Error("Translation stream finished without returning an image.");
@@ -464,7 +478,7 @@ export class TransportClient {
     jsonPayload: string
   ): Promise<Blob> {
     const response = await this.fetchImpl(
-      joinServerUrl(options.settings.serverBaseUrl, "/translate/image/stream"),
+      joinServerUrl(options.settings.serverBaseUrl, "/translate/image/stream/web"),
       {
         method: "POST",
         headers: buildJsonHeaders(options.settings),
@@ -481,7 +495,12 @@ export class TransportClient {
       throw new Error("Translation response does not expose a readable stream.");
     }
 
-    return parseTranslationStream(response.body, options.onEvent, options.signal);
+    return parseTranslationStream(
+      response.body,
+      options.onEvent,
+      options.signal,
+      (folderName) => this.fetchWebFastPathResultBlob(options.settings, folderName, options.signal)
+    );
   }
 
   private async translateImageWithJsonGMStream(
@@ -493,7 +512,7 @@ export class TransportClient {
 
       const request = this.gmRequest({
         method: "POST",
-        url: joinServerUrl(options.settings.serverBaseUrl, "/translate/image/stream"),
+        url: joinServerUrl(options.settings.serverBaseUrl, "/translate/image/stream/web"),
         headers: buildJsonHeaders(options.settings),
         data: jsonPayload,
         responseType: "stream",
@@ -517,7 +536,8 @@ export class TransportClient {
             const blob = await parseTranslationStream(
               response.response,
               options.onEvent,
-              options.signal
+              options.signal,
+              (folderName) => this.fetchWebFastPathResultBlob(options.settings, folderName, options.signal)
             );
             resolve(blob);
           } catch (error) {
@@ -587,7 +607,7 @@ export class TransportClient {
 
   private async translateImageWithFetch(options: TranslateImageOptions): Promise<Blob> {
     const response = await this.fetchImpl(
-      joinServerUrl(options.settings.serverBaseUrl, "/translate/with-form/image/stream"),
+      joinServerUrl(options.settings.serverBaseUrl, "/translate/with-form/image/stream/web"),
       {
         method: "POST",
         headers: buildHeaders(options.settings),
@@ -604,7 +624,12 @@ export class TransportClient {
       throw new Error("Translation response does not expose a readable stream.");
     }
 
-    return parseTranslationStream(response.body, options.onEvent, options.signal);
+    return parseTranslationStream(
+      response.body,
+      options.onEvent,
+      options.signal,
+      (folderName) => this.fetchWebFastPathResultBlob(options.settings, folderName, options.signal)
+    );
   }
 
   private async translateImageWithGMStream(options: TranslateImageOptions): Promise<Blob> {
@@ -619,7 +644,7 @@ export class TransportClient {
 
         const request = this.gmRequest({
           method: "POST",
-          url: joinServerUrl(options.settings.serverBaseUrl, "/translate/with-form/image/stream"),
+          url: joinServerUrl(options.settings.serverBaseUrl, "/translate/with-form/image/stream/web"),
           headers: multipartPayload.headers,
           data: multipartPayload.data,
           responseType: "stream",
@@ -643,7 +668,8 @@ export class TransportClient {
               const blob = await parseTranslationStream(
                 response.response,
                 options.onEvent,
-                options.signal
+                options.signal,
+                (folderName) => this.fetchWebFastPathResultBlob(options.settings, folderName, options.signal)
               );
               resolve(blob);
             } catch (error) {
@@ -714,6 +740,78 @@ export class TransportClient {
 
         options.signal?.addEventListener("abort", () => request.abort(), { once: true });
       })().catch(reject);
+    });
+  }
+
+  private async fetchWebFastPathResultBlob(
+    settings: UserscriptSettings,
+    folderName: string,
+    signal?: AbortSignal
+  ): Promise<Blob> {
+    try {
+      const response = await this.fetchImpl(
+        joinServerUrl(settings.serverBaseUrl, `/result/${encodeURIComponent(folderName)}/final.png`),
+        {
+          method: "GET",
+          headers: buildHeaders(settings),
+          signal
+        }
+      );
+
+      if (!response.ok) {
+        throw await toHttpStatusError(response);
+      }
+
+      const normalizedBlob = await normalizeRenderedImageBlob(await response.blob());
+      if (!normalizedBlob) {
+        throw new Error("Fast-path result did not return a valid PNG image.");
+      }
+      return normalizedBlob;
+    } catch (error) {
+      if (!shouldFallback(error)) {
+        throw error;
+      }
+      return this.fetchWebFastPathResultBlobWithGM(settings, folderName, signal);
+    }
+  }
+
+  private async fetchWebFastPathResultBlobWithGM(
+    settings: UserscriptSettings,
+    folderName: string,
+    signal?: AbortSignal
+  ): Promise<Blob> {
+    return new Promise<Blob>((resolve, reject) => {
+      const request = this.gmRequest({
+        method: "GET",
+        url: joinServerUrl(settings.serverBaseUrl, `/result/${encodeURIComponent(folderName)}/final.png`),
+        headers: buildHeaders(settings),
+        responseType: "blob",
+        fetch: true,
+        onload: (response) => {
+          if (response.status >= 400) {
+            reject(new HttpStatusError(response.status, response.responseText || `HTTP ${response.status}`));
+            return;
+          }
+
+          if (response.response instanceof Blob) {
+            void normalizeTranslationResponseBlob(response.response).then(resolve).catch(reject);
+            return;
+          }
+
+          if (response.response instanceof ArrayBuffer) {
+            void normalizeTranslationResponseBlob(
+              new Blob([response.response], { type: "image/png" })
+            ).then(resolve).catch(reject);
+            return;
+          }
+
+          reject(new Error("GM fast-path result request did not return an image response."));
+        },
+        onerror: () => reject(new Error("GM transport failed to fetch the fast-path result image.")),
+        ontimeout: () => reject(new Error("GM transport timed out while fetching the fast-path result image."))
+      });
+
+      signal?.addEventListener("abort", () => request.abort(), { once: true });
     });
   }
 }
