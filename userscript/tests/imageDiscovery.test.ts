@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { manga18SiteAdapter } from "../src/adapters/manga18";
 import { manhwaRawSiteAdapter } from "../src/adapters/manhwaRaw";
 import type { SiteAdapterDefinition } from "../src/adapters/types";
 import { ImageDiscovery } from "../src/core/imageDiscovery";
@@ -251,7 +252,54 @@ describe("ImageDiscovery", () => {
     });
     discovery.stop();
   });
+
+  it("only emits manga18 images declared by slides_p_path", () => {
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+    const eligible = vi.fn();
+
+    document.body.innerHTML = `
+      <script>
+        window.slides_p_path = ["${window.btoa("https://img.manga18.club/wireless/059/001.webp")}"];
+      </script>
+      <section class="chapter-content"></section>
+    `;
+
+    const root = document.querySelector(".chapter-content");
+    const chapterImage = createLoadedImage("https://img.manga18.club/wireless/059/001.webp");
+    const bannerImage = createLoadedImage("https://ads.manga18.club/banner.jpg");
+    root?.append(chapterImage, bannerImage);
+
+    const discovery = new ImageDiscovery({
+      adapters: [manga18SiteAdapter],
+      onImageEligible: eligible
+    });
+    discovery.start();
+    FakeIntersectionObserver.instance?.trigger(chapterImage);
+    FakeIntersectionObserver.instance?.trigger(bannerImage);
+
+    expect(eligible).toHaveBeenCalledTimes(1);
+    expect(eligible).toHaveBeenCalledWith({
+      image: chapterImage,
+      sourceUrl: "https://img.manga18.club/wireless/059/001.webp",
+      adapterId: "manga18"
+    });
+    discovery.stop();
+  });
 });
+
+function createLoadedImage(sourceUrl: string): HTMLImageElement {
+  const image = document.createElement("img");
+  Object.defineProperty(image, "complete", { value: true });
+  Object.defineProperty(image, "naturalWidth", { value: 1200 });
+  Object.defineProperty(image, "naturalHeight", { value: 1800 });
+  Object.defineProperty(image, "currentSrc", { value: sourceUrl });
+  image.getBoundingClientRect = () =>
+    ({
+      width: 480,
+      height: 720
+    }) as DOMRect;
+  return image;
+}
 
 function createAdapter(
   overrides: Partial<SiteAdapterDefinition> & Pick<SiteAdapterDefinition, "id" | "label">

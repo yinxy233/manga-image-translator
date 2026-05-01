@@ -5,6 +5,7 @@ import {
   resolveActiveSiteAdapters,
   resolveSiteAdapterStates
 } from "../src/adapters";
+import { manga18SiteAdapter } from "../src/adapters/manga18";
 import { manhwaRawSiteAdapter } from "../src/adapters/manhwaRaw";
 
 describe("site adapter registry", () => {
@@ -124,5 +125,79 @@ describe("site adapter registry", () => {
       "https://zek6.mrawx.cyou/manga/example/01.webp"
     );
     expect(manhwaRawSiteAdapter.isImageCandidate(bannerImage)).toBe(false);
+  });
+
+  it("activates the manga18 adapter for chapter pages", () => {
+    const chapterUrl = new URL("https://manga18.club/manhwa/wireless-onahole-raw/chapter-59");
+    const states = resolveSiteAdapterStates(chapterUrl, buildDefaultAdapterOverrides());
+    const activeAdapters = resolveActiveSiteAdapters(chapterUrl, buildDefaultAdapterOverrides());
+
+    expect(states.find((state) => state.id === "manga18")).toMatchObject({
+      matched: true,
+      active: true
+    });
+    expect(states.find((state) => state.id === "generic")).toMatchObject({
+      matched: false,
+      active: false
+    });
+    expect(activeAdapters.map((adapter) => adapter.id)).toEqual(["manga18"]);
+  });
+
+  it("falls back to the generic adapter on manga18 series pages", () => {
+    const seriesUrl = new URL("https://manga18.club/manhwa/wireless-onahole-raw");
+    const states = resolveSiteAdapterStates(seriesUrl, buildDefaultAdapterOverrides());
+    const activeAdapters = resolveActiveSiteAdapters(seriesUrl, buildDefaultAdapterOverrides());
+
+    expect(states.find((state) => state.id === "manga18")).toMatchObject({
+      matched: false,
+      active: false
+    });
+    expect(states.find((state) => state.id === "generic")).toMatchObject({
+      matched: true,
+      active: true
+    });
+    expect(activeAdapters.map((adapter) => adapter.id)).toEqual(["generic"]);
+  });
+
+  it("only treats manga18 slide images as candidates", () => {
+    document.body.innerHTML = `
+      <script>
+        window.slides_p_path = ["${window.btoa("https://img.manga18.club/wireless/059/001.webp")}"];
+      </script>
+      <main class="chapter-content">
+        <img data-src="https://img.manga18.club/wireless/059/001.webp" />
+        <img data-src="https://ads.manga18.club/banner.jpg" />
+      </main>
+    `;
+
+    const [chapterImage, adImage] = Array.from(document.querySelectorAll("img"));
+
+    expect(manga18SiteAdapter.isImageCandidate(chapterImage)).toBe(true);
+    expect(manga18SiteAdapter.resolveImageSource(chapterImage)).toBe(
+      "https://img.manga18.club/wireless/059/001.webp"
+    );
+    expect(manga18SiteAdapter.isImageCandidate(adImage)).toBe(false);
+  });
+
+  it("resolves manga18 lazy placeholder images by slide order", () => {
+    document.body.innerHTML = `
+      <script>
+        window.slides_p_path = [
+          "${window.btoa("https://img.manga18.club/wireless/059/001.webp")}",
+          "${window.btoa("https://img.manga18.club/wireless/059/002.webp")}"
+        ];
+      </script>
+      <section class="chapter-content">
+        <img src="/static/loading.gif" />
+        <img src="/static/loading.gif" />
+      </section>
+    `;
+
+    const [, secondImage] = Array.from(document.querySelectorAll("img"));
+
+    expect(manga18SiteAdapter.isImageCandidate(secondImage)).toBe(true);
+    expect(manga18SiteAdapter.resolveImageSource(secondImage)).toBe(
+      "https://img.manga18.club/wireless/059/002.webp"
+    );
   });
 });

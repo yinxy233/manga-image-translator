@@ -1,10 +1,12 @@
 import { genericSiteAdapter } from "./generic";
+import { manga18SiteAdapter } from "./manga18";
 import { manhwaRawSiteAdapter } from "./manhwaRaw";
 import { mamekichimamekoSiteAdapter } from "./mamekichimameko";
 import type { LocationLike, SiteAdapterDefinition, SiteAdapterState } from "./types";
 
 const SITE_SPECIFIC_ADAPTERS: ReadonlyArray<SiteAdapterDefinition> = [
   mamekichimamekoSiteAdapter,
+  manga18SiteAdapter,
   manhwaRawSiteAdapter
 ];
 const ALL_SITE_ADAPTERS: ReadonlyArray<SiteAdapterDefinition> = [...SITE_SPECIFIC_ADAPTERS, genericSiteAdapter];
