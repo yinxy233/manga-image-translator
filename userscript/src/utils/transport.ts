@@ -39,6 +39,8 @@ interface TranslationConfigPayload {
   mask_dilation_offset: number;
 }
 
+type FinalReadyBlobResolver = ((folderName: string) => Promise<Blob>) | undefined;
+
 export class HttpStatusError extends Error {
   readonly status: number;
 
@@ -240,6 +242,20 @@ function shouldFallback(error: unknown): boolean {
     return false;
   }
   return !(error instanceof HttpStatusError);
+}
+
+function useWebFastPath(settings: UserscriptSettings): boolean {
+  return settings.streamEndpoint === "web-fast";
+}
+
+function getJsonStreamPath(settings: UserscriptSettings): string {
+  return useWebFastPath(settings) ? "/translate/image/stream/web" : "/translate/image/stream";
+}
+
+function getMultipartStreamPath(settings: UserscriptSettings): string {
+  return useWebFastPath(settings)
+    ? "/translate/with-form/image/stream/web"
+    : "/translate/with-form/image/stream";
 }
 
 function parseHealthPayload(rawPayload: string | HealthPayload): HealthPayload {
@@ -478,7 +494,7 @@ export class TransportClient {
     jsonPayload: string
   ): Promise<Blob> {
     const response = await this.fetchImpl(
-      joinServerUrl(options.settings.serverBaseUrl, "/translate/image/stream/web"),
+      joinServerUrl(options.settings.serverBaseUrl, getJsonStreamPath(options.settings)),
       {
         method: "POST",
         headers: buildJsonHeaders(options.settings),
@@ -499,7 +515,7 @@ export class TransportClient {
       response.body,
       options.onEvent,
       options.signal,
-      (folderName) => this.fetchWebFastPathResultBlob(options.settings, folderName, options.signal)
+      this.resolveFinalReadyBlob(options.settings, options.signal)
     );
   }
 
@@ -512,7 +528,7 @@ export class TransportClient {
 
       const request = this.gmRequest({
         method: "POST",
-        url: joinServerUrl(options.settings.serverBaseUrl, "/translate/image/stream/web"),
+        url: joinServerUrl(options.settings.serverBaseUrl, getJsonStreamPath(options.settings)),
         headers: buildJsonHeaders(options.settings),
         data: jsonPayload,
         responseType: "stream",
@@ -537,7 +553,7 @@ export class TransportClient {
               response.response,
               options.onEvent,
               options.signal,
-              (folderName) => this.fetchWebFastPathResultBlob(options.settings, folderName, options.signal)
+              this.resolveFinalReadyBlob(options.settings, options.signal)
             );
             resolve(blob);
           } catch (error) {
@@ -607,7 +623,7 @@ export class TransportClient {
 
   private async translateImageWithFetch(options: TranslateImageOptions): Promise<Blob> {
     const response = await this.fetchImpl(
-      joinServerUrl(options.settings.serverBaseUrl, "/translate/with-form/image/stream/web"),
+      joinServerUrl(options.settings.serverBaseUrl, getMultipartStreamPath(options.settings)),
       {
         method: "POST",
         headers: buildHeaders(options.settings),
@@ -628,7 +644,7 @@ export class TransportClient {
       response.body,
       options.onEvent,
       options.signal,
-      (folderName) => this.fetchWebFastPathResultBlob(options.settings, folderName, options.signal)
+      this.resolveFinalReadyBlob(options.settings, options.signal)
     );
   }
 
@@ -644,7 +660,7 @@ export class TransportClient {
 
         const request = this.gmRequest({
           method: "POST",
-          url: joinServerUrl(options.settings.serverBaseUrl, "/translate/with-form/image/stream/web"),
+          url: joinServerUrl(options.settings.serverBaseUrl, getMultipartStreamPath(options.settings)),
           headers: multipartPayload.headers,
           data: multipartPayload.data,
           responseType: "stream",
@@ -669,7 +685,7 @@ export class TransportClient {
                 response.response,
                 options.onEvent,
                 options.signal,
-                (folderName) => this.fetchWebFastPathResultBlob(options.settings, folderName, options.signal)
+                this.resolveFinalReadyBlob(options.settings, options.signal)
               );
               resolve(blob);
             } catch (error) {
@@ -741,6 +757,17 @@ export class TransportClient {
         options.signal?.addEventListener("abort", () => request.abort(), { once: true });
       })().catch(reject);
     });
+  }
+
+  private resolveFinalReadyBlob(
+    settings: UserscriptSettings,
+    signal?: AbortSignal
+  ): FinalReadyBlobResolver {
+    if (!useWebFastPath(settings)) {
+      return undefined;
+    }
+
+    return (folderName) => this.fetchWebFastPathResultBlob(settings, folderName, signal);
   }
 
   private async fetchWebFastPathResultBlob(

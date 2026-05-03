@@ -7,6 +7,7 @@ describe("sanitizeSettings", () => {
   it("keeps a valid upload transport mode", () => {
     const settings = sanitizeSettings({
       uploadTransport: "base64-json",
+      streamEndpoint: "web-fast",
       fullPageTranslateEnabled: true,
       maxConcurrency: 3,
       cacheEnabled: false,
@@ -17,6 +18,7 @@ describe("sanitizeSettings", () => {
     });
 
     expect(settings.uploadTransport).toBe("base64-json");
+    expect(settings.streamEndpoint).toBe("web-fast");
     expect(settings.fullPageTranslateEnabled).toBe(true);
     expect(settings.maxConcurrency).toBe(3);
     expect(settings.cacheEnabled).toBe(false);
@@ -29,10 +31,12 @@ describe("sanitizeSettings", () => {
 
   it("falls back to the default upload transport for invalid values", () => {
     const settings = sanitizeSettings({
-      uploadTransport: "invalid-mode" as never
+      uploadTransport: "invalid-mode" as never,
+      streamEndpoint: "invalid-endpoint" as never
     });
 
     expect(settings.uploadTransport).toBe(DEFAULT_SETTINGS.uploadTransport);
+    expect(settings.streamEndpoint).toBe(DEFAULT_SETTINGS.streamEndpoint);
   });
 
   it("keeps valid pipeline and translator settings", () => {
@@ -115,6 +119,7 @@ describe("sanitizeSettings", () => {
   it("defaults cacheEnabled to the project default when omitted", () => {
     const settings = sanitizeSettings({});
 
+    expect(settings.streamEndpoint).toBe(DEFAULT_SETTINGS.streamEndpoint);
     expect(settings.fullPageTranslateEnabled).toBe(DEFAULT_SETTINGS.fullPageTranslateEnabled);
     expect(settings.cacheEnabled).toBe(DEFAULT_SETTINGS.cacheEnabled);
     expect(settings.adapterOverrides).toEqual(DEFAULT_SETTINGS.adapterOverrides);

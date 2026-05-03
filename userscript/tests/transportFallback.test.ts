@@ -214,6 +214,7 @@ describe("TransportClient", () => {
 
     expect(result).toBeInstanceOf(Blob);
     expect(requestUrl).toContain("/translate/image/stream");
+    expect(requestUrl).not.toContain("/translate/image/stream/web");
     expect(requestInit.headers).toMatchObject({ "Content-Type": "application/json" });
     expect(body.image.startsWith("data:image/png;base64,")).toBe(true);
     expect(body.config.translator.target_lang).toBe("CHS");
@@ -230,6 +231,30 @@ describe("TransportClient", () => {
     });
     expect(body.config.mask_dilation_offset).toBe(18);
     expect(gmRequest).not.toHaveBeenCalled();
+  });
+
+  it("uses the standard multipart stream endpoint by default", async () => {
+    const fetchImpl = vi.fn(async () => new Response(createStreamResponse(), { status: 200 }));
+    const transport = new TransportClient({
+      fetchImpl,
+      gmRequest: vi.fn() as unknown as (details: GMRequestDetails<unknown>) => GMRequestHandle
+    });
+
+    const result = await transport.translateImage({
+      imageBlob: new Blob(["test-image"], { type: "image/png" }),
+      fileName: "page.png",
+      settings: DEFAULT_SETTINGS,
+      onEvent: vi.fn()
+    });
+
+    const requestUrls = (
+      fetchImpl.mock.calls as unknown as Array<[RequestInfo | URL, RequestInit?]>
+    ).map((call) => String(call[0]));
+
+    expect(result).toBeInstanceOf(Blob);
+    expect(requestUrls).toHaveLength(1);
+    expect(requestUrls[0]).toContain("/translate/with-form/image/stream");
+    expect(requestUrls[0]).not.toContain("/translate/with-form/image/stream/web");
   });
 
   it("loads the web fast-path final image after final_ready progress", async () => {
@@ -254,7 +279,10 @@ describe("TransportClient", () => {
     const result = await transport.translateImage({
       imageBlob: new Blob(["test-image"], { type: "image/png" }),
       fileName: "page.png",
-      settings: DEFAULT_SETTINGS,
+      settings: {
+        ...DEFAULT_SETTINGS,
+        streamEndpoint: "web-fast"
+      },
       onEvent
     });
 
@@ -270,6 +298,40 @@ describe("TransportClient", () => {
       text: "final_ready:folder 1"
     });
     expect(gmRequest).not.toHaveBeenCalled();
+  });
+
+  it("uses the web fast-path JSON endpoint when configured", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/result/")) {
+        return new Response(PNG_BYTES, {
+          status: 200,
+          headers: { "Content-Type": "image/png" }
+        });
+      }
+      return new Response(createFastPathStreamResponse("json folder"), { status: 200 });
+    });
+    const transport = new TransportClient({
+      fetchImpl,
+      gmRequest: vi.fn() as unknown as (details: GMRequestDetails<unknown>) => GMRequestHandle
+    });
+
+    const result = await transport.translateImage({
+      imageBlob: new Blob(["test-image"], { type: "image/png" }),
+      fileName: "page.png",
+      settings: {
+        ...DEFAULT_SETTINGS,
+        uploadTransport: "base64-json",
+        streamEndpoint: "web-fast"
+      },
+      onEvent: vi.fn()
+    });
+
+    const requestUrls = fetchImpl.mock.calls.map((call) => String(call[0]));
+
+    expect(result).toBeInstanceOf(Blob);
+    expect(requestUrls[0]).toContain("/translate/image/stream/web");
+    expect(requestUrls[1]).toContain("/result/json%20folder/final.png");
   });
 
   it("serializes GM uploads as explicit multipart payloads", async () => {

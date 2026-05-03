@@ -12,6 +12,7 @@ import {
   MIN_MASK_DILATION_OFFSET,
   MIN_UNCLIP_RATIO,
   RENDER_DIRECTION_OPTIONS,
+  STREAM_ENDPOINT_OPTIONS,
   TRANSLATOR_OPTIONS,
   TRANSPORT_OPTIONS
 } from "../config";
@@ -1392,6 +1393,8 @@ export class OverlayManager {
 
   private readonly transportSelect: HTMLSelectElement;
 
+  private readonly streamEndpointSelect: HTMLSelectElement;
+
   private readonly autoCheckbox: HTMLInputElement;
 
   private readonly fullPageCheckbox: HTMLInputElement;
@@ -1495,6 +1498,7 @@ export class OverlayManager {
     this.inpaintingSizeInput = document.createElement("select");
     this.maskDilationOffsetInput = document.createElement("input");
     this.transportSelect = document.createElement("select");
+    this.streamEndpointSelect = document.createElement("select");
     this.autoCheckbox = document.createElement("input");
     this.fullPageCheckbox = document.createElement("input");
     this.cacheCheckbox = document.createElement("input");
@@ -1552,6 +1556,7 @@ export class OverlayManager {
     }
     this.maskDilationOffsetInput.value = String(settings.maskDilationOffset);
     this.transportSelect.value = settings.uploadTransport;
+    this.streamEndpointSelect.value = settings.streamEndpoint;
     this.autoCheckbox.checked = settings.autoTranslateEnabled;
     this.fullPageCheckbox.checked = settings.fullPageTranslateEnabled;
     this.cacheCheckbox.checked = settings.cacheEnabled;
@@ -1911,6 +1916,14 @@ export class OverlayManager {
       this.transportSelect.appendChild(element);
     }
 
+    this.streamEndpointSelect.className = "mit-select";
+    for (const option of STREAM_ENDPOINT_OPTIONS) {
+      const element = document.createElement("option");
+      element.value = option.value;
+      element.textContent = option.label;
+      this.streamEndpointSelect.appendChild(element);
+    }
+
     this.autoCheckbox.type = "checkbox";
     this.fullPageCheckbox.type = "checkbox";
     this.cacheCheckbox.type = "checkbox";
@@ -1964,7 +1977,8 @@ export class OverlayManager {
     const advancedGrid = document.createElement("div");
     advancedGrid.className = "mit-settings-grid";
     advancedGrid.append(
-      this.createField("上传方式", this.transportSelect),
+      this.createField("上传编码", this.transportSelect),
+      this.createField("流式接口", this.streamEndpointSelect),
       this.createSwitchField("自动启动", this.autoCheckbox, "加载页面后自动开始扫描", true),
       this.createSwitchField(
         "整页翻译",
@@ -2038,6 +2052,7 @@ export class OverlayManager {
       inpaintingSize: Number(this.inpaintingSizeInput.value),
       maskDilationOffset: Number(this.maskDilationOffsetInput.value),
       uploadTransport: this.transportSelect.value as UserscriptSettings["uploadTransport"],
+      streamEndpoint: this.streamEndpointSelect.value as UserscriptSettings["streamEndpoint"],
       autoTranslateEnabled: this.autoCheckbox.checked,
       fullPageTranslateEnabled: this.fullPageCheckbox.checked,
       cacheEnabled: this.cacheCheckbox.checked,

@@ -15,6 +15,7 @@ export const DEFAULT_SETTINGS: UserscriptSettings = {
   inpaintingSize: 2048,
   maskDilationOffset: 30,
   uploadTransport: "multipart",
+  streamEndpoint: "standard",
   autoTranslateEnabled: false,
   fullPageTranslateEnabled: false,
   cacheEnabled: true,
@@ -148,6 +149,14 @@ export const TRANSPORT_OPTIONS: Array<{
 }> = [
   { value: "multipart", label: "表单上传（Multipart）" },
   { value: "base64-json", label: "Base64（JSON）" }
+];
+
+export const STREAM_ENDPOINT_OPTIONS: Array<{
+  value: UserscriptSettings["streamEndpoint"];
+  label: string;
+}> = [
+  { value: "standard", label: "标准流（/stream，默认）" },
+  { value: "web-fast", label: "Web 快路径（/stream/web）" }
 ];
 
 export const MIN_RENDER_WIDTH = 220;

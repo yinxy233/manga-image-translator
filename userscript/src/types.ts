@@ -28,6 +28,7 @@ export type TranslatorKey =
   | "none";
 
 export type UploadTransport = "multipart" | "base64-json";
+export type StreamEndpoint = "standard" | "web-fast";
 export type DetectorKey = "default" | "dbconvnext" | "ctd" | "craft" | "paddle" | "none";
 export type InpainterKey = "default" | "lama_large" | "lama_mpe" | "sd" | "none" | "original";
 export type RenderDirection = "auto" | "horizontal" | "vertical";
@@ -52,6 +53,7 @@ export interface UserscriptSettings {
   inpaintingSize: number;
   maskDilationOffset: number;
   uploadTransport: UploadTransport;
+  streamEndpoint: StreamEndpoint;
   autoTranslateEnabled: boolean;
   fullPageTranslateEnabled: boolean;
   cacheEnabled: boolean;

@@ -125,6 +125,7 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - `inpaintingSize`
 - `maskDilationOffset`
 - `uploadTransport`
+- `streamEndpoint`
 - `autoTranslateEnabled`
 - `cacheEnabled`
 - `maxConcurrency`
@@ -145,6 +146,7 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - `inpaintingSize`: `2048`
 - `maskDilationOffset`: `30`
 - `uploadTransport`: `multipart`
+- `streamEndpoint`: `standard`
 - `cacheEnabled`: `true`
 - `maxConcurrency`: `2`
 - `adapterOverrides`: 保持默认，按站点逐个开启或关闭
@@ -161,6 +163,11 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - `maskDilationOffset` -> `config.mask_dilation_offset`
 
 其中 `detectionSize` 和 `inpaintingSize` 在设置面板中使用预设下拉选项，避免手动输入异常值。
+
+`streamEndpoint` 用于控制流式翻译接口：
+
+- `standard`: 默认值，走标准 `/stream` 接口，兼容性更稳妥。
+- `web-fast`: 走 `/stream/web` 快路径；当服务端支持该能力时，通常可以更早拿到 `final_ready` 结果。
 
 如果你希望多张图片同时翻译，需要同时满足两点：
 
