@@ -61,7 +61,7 @@ async function readBlobBytes(blob: Blob): Promise<Uint8Array> {
 }
 
 describe("TranslationResultCache", () => {
-  it("builds a stable key from source URL, image bytes and translation config", async () => {
+  it("builds a stable key from image bytes and translation config", async () => {
     const cache = new TranslationResultCache({
       digest: createDigestMock(),
       store: new MemoryTranslationCacheStore()
@@ -95,7 +95,7 @@ describe("TranslationResultCache", () => {
 
     expect(baseKey).toBe(sameKey);
     expect(baseKey).not.toBe(otherImageKey);
-    expect(baseKey).not.toBe(otherSourceKey);
+    expect(baseKey).toBe(otherSourceKey);
     expect(baseKey).not.toBe(otherConfigKey);
   });
 

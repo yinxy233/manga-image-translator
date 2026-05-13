@@ -12,8 +12,8 @@ import type {
   TranslationEvent,
   UserscriptSettings
 } from "../types";
-import { extractImageBlobFromElement } from "../utils/image";
-import { buildImageSignature } from "../utils/signature";
+import { extractImageBlobFromElement, getManagedImageSourceUrl } from "../utils/image";
+import { buildImageContentHash, buildImageContentSignature } from "../utils/signature";
 import { HttpStatusError, TransportClient } from "../utils/transport";
 import { type DiscoveredImageCandidate, ImageDiscovery } from "./imageDiscovery";
 import {
@@ -30,6 +30,7 @@ interface SharedImageTask {
   signature: string;
   sourceUrl: string;
   sourceImage: HTMLImageElement | null;
+  sourceBlob: Blob | null;
   taskId: string;
   imageIds: Set<string>;
   resultUrl: string | null;
@@ -40,9 +41,16 @@ interface SharedImageTask {
   servedFromCache: boolean;
 }
 
+interface SourceBlobRequest {
+  sourceUrl: string;
+  sourceImage: HTMLImageElement | null;
+  sourceBlob?: Blob | null;
+}
+
 interface ImageEntry {
   id: string;
   image: HTMLImageElement;
+  sourceUrl: string;
   shared: SharedImageTask;
   presentation: ImagePresentationState;
   showOriginal: boolean;
@@ -121,6 +129,8 @@ export class TranslatorController {
   private imageSequence = 0;
 
   private generation = 0;
+
+  private discoveryRuns = new WeakMap<HTMLImageElement, number>();
 
   private imageIds = new WeakMap<HTMLImageElement, string>();
 
@@ -209,7 +219,7 @@ export class TranslatorController {
 
       const showOriginal = this.globalShowOriginal || entry.showOriginal;
       syncImagePresentation(entry.image, entry.presentation, {
-        sourceUrl: entry.shared.sourceUrl,
+        sourceUrl: entry.sourceUrl,
         resultUrl: entry.shared.resultUrl,
         showOriginal
       });
@@ -283,13 +293,64 @@ export class TranslatorController {
       return;
     }
 
-    const { image, sourceUrl } = candidate;
+    void this.prepareDiscoveredImage(candidate).catch((error: unknown) => {
+      const message = this.humanizeError(error);
+      this.connection = createConnectionState(message, "error");
+      this.renderChrome();
+      this.overlay.toast(message, "error");
+    });
+  }
 
-    const signature = buildImageSignature(sourceUrl, this.settings);
+  private async prepareDiscoveredImage(candidate: DiscoveredImageCandidate): Promise<void> {
+    const { image, sourceUrl } = candidate;
+    const discoveryRun = this.nextDiscoveryRun(image);
+    const generation = this.generation;
     const existingId = this.imageIds.get(image);
+    const existingEntry = existingId ? this.imageEntries.get(existingId) : null;
+    const currentSource = image.currentSrc || image.src || "";
+
+    if (
+      existingEntry?.shared.resultUrl &&
+      currentSource === existingEntry.shared.resultUrl &&
+      getManagedImageSourceUrl(image) === sourceUrl
+    ) {
+      existingEntry.sourceUrl = sourceUrl;
+      refreshImagePresentationState(existingEntry.image, existingEntry.presentation, sourceUrl);
+      return;
+    }
+
+    const sourceBlob = await this.resolveSourceBlob({ sourceUrl, sourceImage: image, sourceBlob: null });
+
+    if (
+      generation !== this.generation ||
+      this.discoveryRuns.get(image) !== discoveryRun ||
+      !this.enabled ||
+      !this.discoveryReady ||
+      !image.isConnected
+    ) {
+      return;
+    }
+
+    const currentSourceUrl = this.resolveCurrentSourceUrl(candidate);
+    if (currentSourceUrl !== sourceUrl) {
+      return;
+    }
+
+    const imageHash = await buildImageContentHash(sourceBlob);
+    if (
+      generation !== this.generation ||
+      this.discoveryRuns.get(image) !== discoveryRun ||
+      !this.enabled ||
+      !this.discoveryReady ||
+      !image.isConnected
+    ) {
+      return;
+    }
+
+    const signature = buildImageContentSignature(imageHash, this.settings);
     if (existingId) {
-      const existingEntry = this.imageEntries.get(existingId);
       if (existingEntry?.shared.signature === signature) {
+        existingEntry.sourceUrl = sourceUrl;
         refreshImagePresentationState(existingEntry.image, existingEntry.presentation, sourceUrl);
         return;
       }
@@ -310,6 +371,7 @@ export class TranslatorController {
         signature,
         sourceUrl,
         sourceImage: image,
+        sourceBlob,
         taskId: `mit-task-${signature}`,
         imageIds: new Set<string>(),
         resultUrl: null,
@@ -326,11 +388,15 @@ export class TranslatorController {
     if (!shared.sourceImage || !shared.sourceImage.isConnected) {
       shared.sourceImage = image;
     }
+    if (!shared.sourceBlob) {
+      shared.sourceBlob = sourceBlob;
+    }
 
     shared.imageIds.add(imageId);
     this.imageEntries.set(imageId, {
       id: imageId,
       image,
+      sourceUrl,
       shared,
       presentation: createImagePresentationState(image, sourceUrl),
       showOriginal: false,
@@ -338,6 +404,19 @@ export class TranslatorController {
       canceled: false
     });
     this.renderImages();
+  }
+
+  private nextDiscoveryRun(image: HTMLImageElement): number {
+    const nextRun = (this.discoveryRuns.get(image) ?? 0) + 1;
+    this.discoveryRuns.set(image, nextRun);
+    return nextRun;
+  }
+
+  private resolveCurrentSourceUrl(candidate: DiscoveredImageCandidate): string | null {
+    const adapter = resolveActiveSiteAdapters(window.location, this.settings.adapterOverrides)
+      .find((activeAdapter) => activeAdapter.id === candidate.adapterId);
+
+    return adapter?.resolveImageSource(candidate.image) ?? null;
   }
 
   private enqueueSharedTask(shared: SharedImageTask): void {
@@ -468,12 +547,21 @@ export class TranslatorController {
     });
   }
 
-  private async resolveSourceBlob(shared: SharedImageTask, signal?: AbortSignal): Promise<Blob> {
+  private async resolveSourceBlob(shared: SourceBlobRequest, signal?: AbortSignal): Promise<Blob> {
+    if (shared.sourceBlob) {
+      return shared.sourceBlob;
+    }
+
     if (shared.sourceImage?.isConnected) {
-      // 对已显示在页面上的图片优先复用浏览器内存中的像素，避免某些图床对脚本二次拉图返回 403。
-      const sourceBlob = await extractImageBlobFromElement(shared.sourceImage);
-      if (sourceBlob) {
-        return sourceBlob;
+      const currentSource = shared.sourceImage.currentSrc || shared.sourceImage.src || "";
+      const managedSource = getManagedImageSourceUrl(shared.sourceImage);
+      if (!currentSource.startsWith("blob:") || managedSource !== shared.sourceUrl) {
+        // 对已显示在页面上的图片优先复用浏览器内存中的像素，避免某些图床对脚本二次拉图返回 403。
+        // 如果当前 blob: 是脚本已套用的译图，必须回退到原始 URL，避免把旧译图当成原图继续翻译。
+        const sourceBlob = await extractImageBlobFromElement(shared.sourceImage);
+        if (sourceBlob) {
+          return sourceBlob;
+        }
       }
     }
 
@@ -560,6 +648,7 @@ export class TranslatorController {
     this.imageEntries.clear();
     this.sharedTasks.clear();
     this.imageIds = new WeakMap<HTMLImageElement, string>();
+    this.discoveryRuns = new WeakMap<HTMLImageElement, number>();
     this.discovery?.reset();
     this.renderImages();
   }

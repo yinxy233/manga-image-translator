@@ -125,10 +125,16 @@ interface ControllerInternals {
     sourceUrl: string;
     adapterId: string;
   }): void;
+  prepareDiscoveredImage(candidate: {
+    image: HTMLImageElement;
+    sourceUrl: string;
+    adapterId: string;
+  }): Promise<void>;
   resolveSourceBlob(
     shared: {
       sourceUrl: string;
       sourceImage: HTMLImageElement | null;
+      sourceBlob?: Blob | null;
     },
     signal?: AbortSignal
   ): Promise<Blob>;
@@ -136,9 +142,17 @@ interface ControllerInternals {
     string,
     {
       shared: {
+        signature: string;
         sourceUrl: string;
         resultUrl: string | null;
       };
+      sourceUrl: string;
+    }
+  >;
+  sharedTasks: Map<
+    string,
+    {
+      sourceUrl: string;
     }
   >;
   renderImages(): void;
@@ -168,6 +182,8 @@ describe("TranslatorController image presentation", () => {
     mockFetchImageBlob.mockReset();
     mockTranslateImage.mockReset();
     mockCheckHealth.mockReset();
+    mockExtractImageBlobFromElement.mockResolvedValue(new Blob(["default"], { type: "image/png" }));
+    mockFetchImageBlob.mockResolvedValue(new Blob(["fallback"], { type: "image/png" }));
     document.body.innerHTML = "";
     if (typeof URL.revokeObjectURL !== "function") {
       Object.defineProperty(URL, "revokeObjectURL", {
@@ -177,12 +193,12 @@ describe("TranslatorController image presentation", () => {
     }
   });
 
-  it("restores the original source when runtime state is reset", () => {
+  it("restores the original source when runtime state is reset", async () => {
     const controller = asControllerInternals(new TranslatorController());
     controller.discoveryReady = true;
     const image = createImage("https://example.com/original.png");
 
-    controller.handleDiscoveredImage({
+    await controller.prepareDiscoveredImage({
       image,
       sourceUrl: "https://example.com/original.png",
       adapterId: "generic"
@@ -200,12 +216,12 @@ describe("TranslatorController image presentation", () => {
     expect(getManagedImageSourceUrl(image)).toBeNull();
   });
 
-  it("keeps a replaced image source instead of restoring the previous original", () => {
+  it("keeps a replaced image source instead of restoring the previous original", async () => {
     const controller = asControllerInternals(new TranslatorController());
     controller.discoveryReady = true;
     const image = createImage("https://example.com/original.png");
 
-    controller.handleDiscoveredImage({
+    await controller.prepareDiscoveredImage({
       image,
       sourceUrl: "https://example.com/original.png",
       adapterId: "generic"
@@ -216,17 +232,45 @@ describe("TranslatorController image presentation", () => {
     controller.renderImages();
     image.setAttribute("src", "https://example.com/new-page.png");
 
-    controller.handleDiscoveredImage({
+    await controller.prepareDiscoveredImage({
       image,
       sourceUrl: "https://example.com/new-page.png",
       adapterId: "generic"
     });
 
     expect(image.getAttribute("src")).toBe("https://example.com/new-page.png");
-    expect(Array.from(controller.imageEntries.values())[0]?.shared.sourceUrl).toBe(
+    expect(Array.from(controller.imageEntries.values())[0]?.sourceUrl).toBe(
       "https://example.com/new-page.png"
     );
     expect(getManagedImageSourceUrl(image)).toBe("https://example.com/new-page.png");
+  });
+
+  it("uses image content hash so the same source URL can create separate tasks", async () => {
+    const controller = asControllerInternals(new TranslatorController());
+    controller.discoveryReady = true;
+    const firstImage = createImage("https://example.com/page.png");
+    const secondImage = createImage("https://example.com/page.png");
+
+    mockExtractImageBlobFromElement
+      .mockResolvedValueOnce(new Blob(["first-page"], { type: "image/png" }))
+      .mockResolvedValueOnce(new Blob(["second-page"], { type: "image/png" }));
+
+    await controller.prepareDiscoveredImage({
+      image: firstImage,
+      sourceUrl: "https://example.com/page.png",
+      adapterId: "generic"
+    });
+    await controller.prepareDiscoveredImage({
+      image: secondImage,
+      sourceUrl: "https://example.com/page.png",
+      adapterId: "generic"
+    });
+
+    const entries = Array.from(controller.imageEntries.values());
+
+    expect(controller.sharedTasks.size).toBe(2);
+    expect(entries).toHaveLength(2);
+    expect(entries[0]?.shared.signature).not.toBe(entries[1]?.shared.signature);
   });
 
   it("delays the initial auto scan until the page load has settled", () => {
@@ -281,6 +325,27 @@ describe("TranslatorController image presentation", () => {
 
     expect(sourceBlob).toBe(expectedBlob);
     expect(mockExtractImageBlobFromElement).toHaveBeenCalledWith(image);
+    expect(controller.transport.fetchImageBlob).toHaveBeenCalledWith(
+      "https://example.com/original.png",
+      undefined
+    );
+  });
+
+  it("does not read translated blob pixels as the next source image", async () => {
+    const expectedBlob = new Blob(["fallback"], { type: "image/png" });
+    const controller = asControllerInternals(new TranslatorController());
+    const image = createImage("blob:https://example.com/translated");
+
+    image.setAttribute("data-mit-managed-source-url", "https://example.com/original.png");
+    mockFetchImageBlob.mockResolvedValue(expectedBlob);
+
+    const sourceBlob = await controller.resolveSourceBlob({
+      sourceUrl: "https://example.com/original.png",
+      sourceImage: image
+    });
+
+    expect(sourceBlob).toBe(expectedBlob);
+    expect(mockExtractImageBlobFromElement).not.toHaveBeenCalled();
     expect(controller.transport.fetchImageBlob).toHaveBeenCalledWith(
       "https://example.com/original.png",
       undefined

@@ -1,13 +1,16 @@
 import type { UserscriptSettings } from "./types";
 import { normalizeRenderedImageBlob } from "./utils/image";
-import { buildConfigSignature, normalizeImageUrl } from "./utils/signature";
+import {
+  buildConfigSignature,
+  buildImageContentHash,
+  type DigestFn
+} from "./utils/signature";
 
 const CACHE_DB_NAME = "mit-userscript-cache";
 const CACHE_STORE_NAME = "translation-results";
 const CACHE_DB_VERSION = 1;
 const DEFAULT_MAX_CACHE_ENTRIES = 120;
 
-type DigestFn = (algorithm: AlgorithmIdentifier, data: BufferSource) => Promise<ArrayBuffer>;
 type IndexedDbFactory = Pick<IDBFactory, "open">;
 
 export interface TranslationCacheRecord {
@@ -58,27 +61,6 @@ function transactionToPromise(transaction: IDBTransaction): Promise<void> {
 
 function byteLengthOfBlob(blob: Blob): number {
   return Number.isFinite(blob.size) ? blob.size : 0;
-}
-
-async function blobToArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
-  if (typeof blob.arrayBuffer === "function") {
-    return blob.arrayBuffer();
-  }
-
-  if (typeof FileReader !== "undefined") {
-    return new Promise<ArrayBuffer>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result as ArrayBuffer);
-      reader.onerror = () => reject(reader.error ?? new Error("Failed to read the blob."));
-      reader.readAsArrayBuffer(blob);
-    });
-  }
-
-  return new Response(blob).arrayBuffer();
-}
-
-function toHex(buffer: ArrayBuffer): string {
-  return Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 class IndexedDbTranslationCacheStore implements TranslationCacheStore {
@@ -205,7 +187,7 @@ export class TranslationResultCache {
 
   async buildKey(
     imageBlob: Blob,
-    sourceUrl: string,
+    _sourceUrl: string,
     settings: UserscriptSettings
   ): Promise<string | null> {
     if (!this.digest) {
@@ -213,10 +195,8 @@ export class TranslationResultCache {
     }
 
     try {
-      const imageBytes = await blobToArrayBuffer(imageBlob);
-      const imageHash = toHex(await this.digest("SHA-256", imageBytes));
-      const normalizedSourceUrl = normalizeImageUrl(sourceUrl);
-      return `${normalizedSourceUrl}|${imageHash}|${buildConfigSignature(settings)}`;
+      const imageHash = await buildImageContentHash(imageBlob, this.digest);
+      return `${imageHash}|${buildConfigSignature(settings)}`;
     } catch (error) {
       console.warn("[mit-userscript] Failed to build the translation cache key.", error);
       return null;
