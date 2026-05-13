@@ -47,6 +47,16 @@ interface SourceBlobRequest {
   sourceBlob?: Blob | null;
 }
 
+interface PreparedDiscoveredImage {
+  adapterId: string;
+  discoveryRun: number;
+  generation: number;
+  image: HTMLImageElement;
+  imageHash: string;
+  sourceBlob: Blob;
+  sourceUrl: string;
+}
+
 interface ImageEntry {
   id: string;
   image: HTMLImageElement;
@@ -129,6 +139,12 @@ export class TranslatorController {
   private imageSequence = 0;
 
   private generation = 0;
+
+  private discoverySequence = 0;
+
+  private nextDiscoveryFlushSequence = 1;
+
+  private readonly pendingPreparedImages = new Map<number, PreparedDiscoveredImage | null>();
 
   private discoveryRuns = new WeakMap<HTMLImageElement, number>();
 
@@ -293,15 +309,23 @@ export class TranslatorController {
       return;
     }
 
-    void this.prepareDiscoveredImage(candidate).catch((error: unknown) => {
-      const message = this.humanizeError(error);
-      this.connection = createConnectionState(message, "error");
-      this.renderChrome();
-      this.overlay.toast(message, "error");
-    });
+    const sequence = ++this.discoverySequence;
+    void this.prepareDiscoveredImage(candidate)
+      .then((preparedImage) => {
+        this.commitPreparedDiscovery(sequence, preparedImage);
+      })
+      .catch((error: unknown) => {
+        const message = this.humanizeError(error);
+        this.connection = createConnectionState(message, "error");
+        this.renderChrome();
+        this.overlay.toast(message, "error");
+        this.commitPreparedDiscovery(sequence, null);
+      });
   }
 
-  private async prepareDiscoveredImage(candidate: DiscoveredImageCandidate): Promise<void> {
+  private async prepareDiscoveredImage(
+    candidate: DiscoveredImageCandidate
+  ): Promise<PreparedDiscoveredImage | null> {
     const { image, sourceUrl } = candidate;
     const discoveryRun = this.nextDiscoveryRun(image);
     const generation = this.generation;
@@ -316,7 +340,7 @@ export class TranslatorController {
     ) {
       existingEntry.sourceUrl = sourceUrl;
       refreshImagePresentationState(existingEntry.image, existingEntry.presentation, sourceUrl);
-      return;
+      return null;
     }
 
     const sourceBlob = await this.resolveSourceBlob({ sourceUrl, sourceImage: image, sourceBlob: null });
@@ -328,12 +352,12 @@ export class TranslatorController {
       !this.discoveryReady ||
       !image.isConnected
     ) {
-      return;
+      return null;
     }
 
     const currentSourceUrl = this.resolveCurrentSourceUrl(candidate);
     if (currentSourceUrl !== sourceUrl) {
-      return;
+      return null;
     }
 
     const imageHash = await buildImageContentHash(sourceBlob);
@@ -344,10 +368,73 @@ export class TranslatorController {
       !this.discoveryReady ||
       !image.isConnected
     ) {
+      return null;
+    }
+
+    return {
+      adapterId: candidate.adapterId,
+      discoveryRun,
+      generation,
+      image,
+      imageHash,
+      sourceBlob,
+      sourceUrl
+    };
+  }
+
+  private commitPreparedDiscovery(
+    sequence: number,
+    preparedImage: PreparedDiscoveredImage | null
+  ): void {
+    if (sequence < this.nextDiscoveryFlushSequence) {
+      return;
+    }
+
+    this.pendingPreparedImages.set(sequence, preparedImage);
+    this.flushPreparedDiscoveries();
+  }
+
+  private flushPreparedDiscoveries(): void {
+    while (this.pendingPreparedImages.has(this.nextDiscoveryFlushSequence)) {
+      const preparedImage = this.pendingPreparedImages.get(this.nextDiscoveryFlushSequence) ?? null;
+      this.pendingPreparedImages.delete(this.nextDiscoveryFlushSequence);
+      this.nextDiscoveryFlushSequence += 1;
+
+      if (preparedImage) {
+        this.registerPreparedImage(preparedImage);
+      }
+    }
+  }
+
+  private registerPreparedImage(preparedImage: PreparedDiscoveredImage): void {
+    const {
+      adapterId,
+      discoveryRun,
+      generation,
+      image,
+      imageHash,
+      sourceBlob,
+      sourceUrl
+    } = preparedImage;
+
+    if (
+      generation !== this.generation ||
+      this.discoveryRuns.get(image) !== discoveryRun ||
+      !this.enabled ||
+      !this.discoveryReady ||
+      !image.isConnected
+    ) {
+      return;
+    }
+
+    const currentSourceUrl = this.resolveCurrentSourceUrl({ adapterId, image, sourceUrl });
+    if (currentSourceUrl !== sourceUrl) {
       return;
     }
 
     const signature = buildImageContentSignature(imageHash, this.settings);
+    const existingId = this.imageIds.get(image);
+    const existingEntry = existingId ? this.imageEntries.get(existingId) : null;
     if (existingId) {
       if (existingEntry?.shared.signature === signature) {
         existingEntry.sourceUrl = sourceUrl;
@@ -637,6 +724,8 @@ export class TranslatorController {
     this.clearInitialAutoTranslateScan();
     this.generation += 1;
     this.queue.reset("canceled");
+    this.pendingPreparedImages.clear();
+    this.nextDiscoveryFlushSequence = this.discoverySequence + 1;
     for (const entry of this.imageEntries.values()) {
       releaseImagePresentation(entry.image, entry.presentation);
     }

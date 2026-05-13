@@ -129,7 +129,8 @@ interface ControllerInternals {
     image: HTMLImageElement;
     sourceUrl: string;
     adapterId: string;
-  }): Promise<void>;
+  }): Promise<unknown | null>;
+  registerPreparedImage(preparedImage: unknown): void;
   resolveSourceBlob(
     shared: {
       sourceUrl: string;
@@ -141,6 +142,7 @@ interface ControllerInternals {
   imageEntries: Map<
     string,
     {
+      image: HTMLImageElement;
       shared: {
         signature: string;
         sourceUrl: string;
@@ -174,6 +176,48 @@ function createImage(src: string): HTMLImageElement {
   return image;
 }
 
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((innerResolve, innerReject) => {
+    resolve = innerResolve;
+    reject = innerReject;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitForAsyncDiscovery(): Promise<void> {
+  await new Promise((resolve) => window.setTimeout(resolve, 0));
+}
+
+async function waitForCondition(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (predicate()) {
+      return;
+    }
+    await waitForAsyncDiscovery();
+  }
+  throw new Error("Timed out waiting for async controller work.");
+}
+
+async function prepareAndRegister(
+  controller: ControllerInternals,
+  candidate: {
+    image: HTMLImageElement;
+    sourceUrl: string;
+    adapterId: string;
+  }
+): Promise<void> {
+  const preparedImage = await controller.prepareDiscoveredImage(candidate);
+  if (preparedImage) {
+    controller.registerPreparedImage(preparedImage);
+  }
+}
+
 describe("TranslatorController image presentation", () => {
   beforeEach(() => {
     vi.useRealTimers();
@@ -198,7 +242,7 @@ describe("TranslatorController image presentation", () => {
     controller.discoveryReady = true;
     const image = createImage("https://example.com/original.png");
 
-    await controller.prepareDiscoveredImage({
+    await prepareAndRegister(controller, {
       image,
       sourceUrl: "https://example.com/original.png",
       adapterId: "generic"
@@ -221,7 +265,7 @@ describe("TranslatorController image presentation", () => {
     controller.discoveryReady = true;
     const image = createImage("https://example.com/original.png");
 
-    await controller.prepareDiscoveredImage({
+    await prepareAndRegister(controller, {
       image,
       sourceUrl: "https://example.com/original.png",
       adapterId: "generic"
@@ -232,7 +276,7 @@ describe("TranslatorController image presentation", () => {
     controller.renderImages();
     image.setAttribute("src", "https://example.com/new-page.png");
 
-    await controller.prepareDiscoveredImage({
+    await prepareAndRegister(controller, {
       image,
       sourceUrl: "https://example.com/new-page.png",
       adapterId: "generic"
@@ -255,12 +299,12 @@ describe("TranslatorController image presentation", () => {
       .mockResolvedValueOnce(new Blob(["first-page"], { type: "image/png" }))
       .mockResolvedValueOnce(new Blob(["second-page"], { type: "image/png" }));
 
-    await controller.prepareDiscoveredImage({
+    await prepareAndRegister(controller, {
       image: firstImage,
       sourceUrl: "https://example.com/page.png",
       adapterId: "generic"
     });
-    await controller.prepareDiscoveredImage({
+    await prepareAndRegister(controller, {
       image: secondImage,
       sourceUrl: "https://example.com/page.png",
       adapterId: "generic"
@@ -271,6 +315,43 @@ describe("TranslatorController image presentation", () => {
     expect(controller.sharedTasks.size).toBe(2);
     expect(entries).toHaveLength(2);
     expect(entries[0]?.shared.signature).not.toBe(entries[1]?.shared.signature);
+  });
+
+  it("preserves discovery order when image hash preparation finishes out of order", async () => {
+    const controller = asControllerInternals(new TranslatorController());
+    controller.discoveryReady = true;
+    const firstImage = createImage("https://example.com/page-1.png");
+    const secondImage = createImage("https://example.com/page-2.png");
+    const firstBlob = createDeferred<Blob>();
+    const secondBlob = createDeferred<Blob>();
+
+    mockExtractImageBlobFromElement
+      .mockReturnValueOnce(firstBlob.promise)
+      .mockReturnValueOnce(secondBlob.promise);
+
+    controller.handleDiscoveredImage({
+      image: firstImage,
+      sourceUrl: "https://example.com/page-1.png",
+      adapterId: "generic"
+    });
+    controller.handleDiscoveredImage({
+      image: secondImage,
+      sourceUrl: "https://example.com/page-2.png",
+      adapterId: "generic"
+    });
+
+    secondBlob.resolve(new Blob(["second-page"], { type: "image/png" }));
+    await waitForAsyncDiscovery();
+
+    expect(controller.imageEntries.size).toBe(0);
+
+    firstBlob.resolve(new Blob(["first-page"], { type: "image/png" }));
+    await waitForCondition(() => controller.imageEntries.size === 2);
+
+    expect(Array.from(controller.imageEntries.values()).map((entry) => entry.sourceUrl)).toEqual([
+      "https://example.com/page-1.png",
+      "https://example.com/page-2.png"
+    ]);
   });
 
   it("delays the initial auto scan until the page load has settled", () => {
