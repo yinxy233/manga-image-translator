@@ -13,6 +13,7 @@ from torch import Tensor
 
 from .common import OfflineInpainter
 from ..config import InpainterConfig
+from ..inpainting_geometry import calculate_minimum_padding
 from ..utils import resize_keep_aspect
 
 
@@ -28,6 +29,10 @@ class LamaMPEInpainter(OfflineInpainter):
     '''
     Better mark as deprecated and replace with lama large
     '''
+
+    # Subclasses can opt into model-specific input constraints. Zero preserves
+    # the existing behavior for LaMa MPE and LaMa Large.
+    _MIN_INFERENCE_DIMENSION = 0
 
     _MODEL_MAPPING = {
         'model': {
@@ -77,7 +82,30 @@ class LamaMPEInpainter(OfflineInpainter):
         if new_h != h or new_w != w:
             image = cv2.resize(image, (new_w, new_h), interpolation = cv2.INTER_LINEAR)
             mask = cv2.resize(mask, (new_w, new_h), interpolation = cv2.INTER_LINEAR)
-        self.logger.info(f'Inpainting resolution: {new_w}x{new_h}')
+
+        # Some architectures require a larger short edge than the shared
+        # eight-pixel alignment guarantees. Pad rather than resize so extreme
+        # aspect ratios retain their geometry, then crop the border afterward.
+        inference_padding = calculate_minimum_padding(
+            new_h,
+            new_w,
+            self._MIN_INFERENCE_DIMENSION,
+        )
+        if not inference_padding.is_empty:
+            image = cv2.copyMakeBorder(
+                image,
+                *inference_padding,
+                borderType=cv2.BORDER_REPLICATE,
+            )
+            mask = cv2.copyMakeBorder(
+                mask,
+                *inference_padding,
+                borderType=cv2.BORDER_CONSTANT,
+                value=0,
+            )
+
+        inference_h, inference_w = image.shape[:2]
+        self.logger.info(f'Inpainting resolution: {inference_w}x{inference_h}')
         if isinstance(self.model, LamaFourier):
             img_torch = torch.from_numpy(image).permute(2, 0, 1).unsqueeze_(0).float() / 255.
         else:
@@ -112,6 +140,10 @@ class LamaMPEInpainter(OfflineInpainter):
         else:
             img_inpainted_torch = img_inpainted_torch.to(torch.float32)
             img_inpainted = ((img_inpainted_torch.cpu().squeeze_(0).permute(1, 2, 0).numpy() + 1.0) * 127.5).astype(np.uint8)
+
+        if not inference_padding.is_empty:
+            crop_y, crop_x = inference_padding.crop_slices(new_h, new_w)
+            img_inpainted = img_inpainted[crop_y, crop_x]
         if new_h != height or new_w != width:
             img_inpainted = cv2.resize(img_inpainted, (width, height), interpolation = cv2.INTER_LINEAR)
         ans = img_inpainted * mask_original + img_original * (1 - mask_original)

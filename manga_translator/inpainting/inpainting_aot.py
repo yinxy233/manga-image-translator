@@ -9,6 +9,10 @@ import torch.nn.functional as F
 from .inpainting_lama_mpe import LamaMPEInpainter
 
 class AotInpainter(LamaMPEInpainter):
+    # The encoder downsamples twice, while AOTBlock reflects 16 pixels. The
+    # smallest eight-aligned input whose encoded short edge exceeds 16 is 72.
+    _MIN_INFERENCE_DIMENSION = 72
+
     _MODEL_MAPPING = {
         'model': {
             'url': 'https://github.com/zyddnys/manga-image-translator/releases/download/beta-0.3/inpainting.ckpt',
