@@ -328,7 +328,7 @@ def render(
     disable_font_border
 ):
     """Render and perspective-warp one translated region into a local ROI."""
-    dst_points = np.asarray(dst_points).reshape(4, 2)
+    dst_points = np.asarray(dst_points).reshape(1, 4, 2)
     fg, bg = region.get_font_colors()
     fg, bg = fg_bg_compare(fg, bg)
 

@@ -1,12 +1,13 @@
 """Regression tests for local-ROI text perspective rendering."""
 
 import unittest
+from unittest import mock
 
 try:
     import cv2
     import numpy as np
 
-    from manga_translator.rendering import _warp_rgba_to_local_roi
+    from manga_translator.rendering import _warp_rgba_to_local_roi, render, text_render
 except ImportError as error:  # pragma: no cover - exercised in minimal environments
     cv2 = None
     np = None
@@ -66,6 +67,47 @@ class RenderingRoiTests(unittest.TestCase):
         self._assert_matches_legacy(
             np.array([[510, 420], [590, 430], [565, 810], [485, 795]], dtype=np.float32)
         )
+
+    def test_render_accepts_batched_textblock_quadrilateral(self):
+        """The normal ``TextBlock.min_rect`` shape reaches ROI compositing."""
+
+        class Region:
+            """Provide the rendering attributes used by one horizontal region."""
+
+            font_size = 20
+            alignment = "center"
+            direction = "h"
+            horizontal = True
+            target_lang = "CHS"
+
+            @staticmethod
+            def get_font_colors():
+                """Return contrasting foreground and background colors."""
+                return (255, 255, 255), (0, 0, 0)
+
+            @staticmethod
+            def get_translation_for_rendering():
+                """Return deterministic text for the mocked renderer."""
+                return "test"
+
+        image = np.zeros((180, 220, 3), dtype=np.uint8)
+        points = np.array(
+            [[[30, 40], [170, 40], [170, 120], [30, 120]]],
+            dtype=np.float32,
+        )
+        rendered_text = np.zeros((40, 80, 4), dtype=np.uint8)
+        rendered_text[:, :, :3] = 255
+        rendered_text[:, :, 3] = 255
+
+        with mock.patch.object(
+            text_render,
+            "put_text_horizontal",
+            return_value=rendered_text,
+        ):
+            output = render(image, Region(), points, True, None, False)
+
+        self.assertEqual(output.shape, image.shape)
+        self.assertGreater(int(output.sum()), 0)
 
 
 if __name__ == "__main__":
