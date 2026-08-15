@@ -13,12 +13,16 @@ from ..utils import TextBlock, Quadrilateral, det_rearrange_forward
 
 MODEL = None
 def det_batch_forward_default(batch: np.ndarray, device: str):
+    """Run DBNet after transferring compact uint8 input to the target device."""
     global MODEL
     if isinstance(batch, list):
         batch = np.array(batch)
-    batch = einops.rearrange(batch.astype(np.float32) / 127.5 - 1.0, 'n h w c -> n c h w')
-    batch = torch.from_numpy(batch).to(device)
-    with torch.no_grad():
+    batch = np.ascontiguousarray(einops.rearrange(batch, 'n h w c -> n c h w'))
+    batch = torch.from_numpy(batch).to(device, non_blocking=device.startswith('cuda'))
+    # Preserve the legacy ``x / 127.5 - 1`` operation order so moving the
+    # normalization to the device does not introduce avoidable numeric drift.
+    batch = batch.float().div_(127.5).sub_(1.0)
+    with torch.inference_mode():
         db, mask = MODEL(batch)
         db = db.sigmoid().cpu().numpy()
         mask = mask.cpu().numpy()

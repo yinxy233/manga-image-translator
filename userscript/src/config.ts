@@ -1,11 +1,12 @@
 import { buildDefaultAdapterOverrides } from "./adapters";
 import type { TranslatorKey, UserscriptSettings } from "./types";
 
+/** Defaults for new installations; persisted settings remain backwards compatible. */
 export const DEFAULT_SETTINGS: UserscriptSettings = {
-  serverBaseUrl: "http://127.0.0.1:8000",
+  serverBaseUrl: "http://127.0.0.1:8001",
   apiKey: "",
   targetLanguage: "CHS",
-  translator: "youdao",
+  translator: "ollama",
   detector: "default",
   detectionSize: 1536,
   boxThreshold: 0.7,
@@ -15,16 +16,19 @@ export const DEFAULT_SETTINGS: UserscriptSettings = {
   inpaintingSize: 2048,
   maskDilationOffset: 30,
   uploadTransport: "multipart",
-  streamEndpoint: "standard",
+  streamEndpoint: "auto",
   autoTranslateEnabled: false,
   fullPageTranslateEnabled: false,
   cacheEnabled: true,
-  maxConcurrency: 2,
+  performanceDiagnostics: false,
+  maxConcurrency: 1,
   launcherPosition: null,
   adapterOverrides: buildDefaultAdapterOverrides()
 };
 
+/** Translator choices shown by the userscript settings overlay. */
 export const TRANSLATOR_OPTIONS: Array<{ value: TranslatorKey; label: string }> = [
+  { value: "ollama", label: "Ollama（本地原生）" },
   { value: "youdao", label: "Youdao" },
   { value: "baidu", label: "Baidu" },
   { value: "deepl", label: "DeepL" },
@@ -151,11 +155,13 @@ export const TRANSPORT_OPTIONS: Array<{
   { value: "base64-json", label: "Base64（JSON）" }
 ];
 
+/** Streaming endpoint policies offered by the userscript settings overlay. */
 export const STREAM_ENDPOINT_OPTIONS: Array<{
   value: UserscriptSettings["streamEndpoint"];
   label: string;
 }> = [
-  { value: "standard", label: "标准流（/stream，默认）" },
+  { value: "auto", label: "自动协商（推荐）" },
+  { value: "standard", label: "标准流（/stream）" },
   { value: "web-fast", label: "Web 快路径（/stream/web）" }
 ];
 
@@ -163,7 +169,8 @@ export const MIN_RENDER_WIDTH = 220;
 export const MIN_RENDER_HEIGHT = 220;
 export const MIN_NATURAL_WIDTH = 300;
 export const MIN_NATURAL_HEIGHT = 300;
-export const INITIAL_AUTO_TRANSLATE_SCAN_DELAY_MS = 1200;
+/** Zero-delay discovery trigger retained for integrations importing the constant. */
+export const INITIAL_AUTO_TRANSLATE_SCAN_DELAY_MS = 0;
 export const MAX_BADGE_TEXT = 32;
 export const MIN_DETECTION_SIZE = 320;
 export const MAX_DETECTION_SIZE = 4096;
@@ -176,6 +183,7 @@ export const MAX_UNCLIP_RATIO = 4;
 export const MIN_MASK_DILATION_OFFSET = 0;
 export const MAX_MASK_DILATION_OFFSET = 80;
 
+/** Human-readable status labels for worker and browser-side progress frames. */
 export const PROGRESS_TEXT_MAP: Record<string, string> = {
   pending: "等待调度",
   detection: "检测文本区域",
@@ -186,6 +194,7 @@ export const PROGRESS_TEXT_MAP: Record<string, string> = {
   upscaling: "超分辨率处理中",
   translating: "翻译文字",
   rendering: "重新排版译文",
+  "png-encoded": "结果图已编码",
   finished: "下载结果图",
   "error-upload": "上传失败",
   "error-lang": "当前翻译器不支持目标语言",

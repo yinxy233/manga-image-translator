@@ -11,6 +11,7 @@ describe("sanitizeSettings", () => {
       fullPageTranslateEnabled: true,
       maxConcurrency: 3,
       cacheEnabled: false,
+      performanceDiagnostics: true,
       adapterOverrides: {
         generic: true,
         mamekichimameko: false
@@ -22,6 +23,7 @@ describe("sanitizeSettings", () => {
     expect(settings.fullPageTranslateEnabled).toBe(true);
     expect(settings.maxConcurrency).toBe(3);
     expect(settings.cacheEnabled).toBe(false);
+    expect(settings.performanceDiagnostics).toBe(true);
     expect(settings.adapterOverrides).toEqual({
       ...DEFAULT_SETTINGS.adapterOverrides,
       generic: true,
@@ -122,6 +124,7 @@ describe("sanitizeSettings", () => {
     expect(settings.streamEndpoint).toBe(DEFAULT_SETTINGS.streamEndpoint);
     expect(settings.fullPageTranslateEnabled).toBe(DEFAULT_SETTINGS.fullPageTranslateEnabled);
     expect(settings.cacheEnabled).toBe(DEFAULT_SETTINGS.cacheEnabled);
+    expect(settings.performanceDiagnostics).toBe(DEFAULT_SETTINGS.performanceDiagnostics);
     expect(settings.adapterOverrides).toEqual(DEFAULT_SETTINGS.adapterOverrides);
   });
 

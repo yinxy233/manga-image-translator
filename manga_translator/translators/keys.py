@@ -48,3 +48,17 @@ CUSTOM_OPENAI_API_BASE = os.getenv('CUSTOM_OPENAI_API_BASE', 'http://localhost:1
 CUSTOM_OPENAI_MODEL = os.getenv('CUSTOM_OPENAI_MODEL', '') # e.g "qwen2.5:7b". Make sure to pull and run it before use.
 CUSTOM_OPENAI_MODEL_CONF = os.getenv('CUSTOM_OPENAI_MODEL_CONF', '') # e.g "qwen2".
 CUSTOM_OPENAI_DISABLE_REASONING = os.getenv('CUSTOM_OPENAI_DISABLE_REASONING', '').lower() in ('1', 'true', 'yes', 'on')
+
+# Ollama native chat API. CUSTOM_OPENAI_* fallbacks preserve existing local
+# installations while allowing the native translator to expose timing data.
+_OLLAMA_COMPAT_BASE = CUSTOM_OPENAI_API_BASE.rstrip('/')
+if _OLLAMA_COMPAT_BASE.endswith('/v1'):
+    _OLLAMA_COMPAT_BASE = _OLLAMA_COMPAT_BASE[:-3]
+OLLAMA_API_BASE = os.getenv('OLLAMA_API_BASE', _OLLAMA_COMPAT_BASE).rstrip('/')
+OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', CUSTOM_OPENAI_MODEL)
+OLLAMA_KEEP_ALIVE = os.getenv('OLLAMA_KEEP_ALIVE', '5m')
+OLLAMA_CONTEXT_LENGTH = int(os.getenv('OLLAMA_CONTEXT_LENGTH', '8192'))
+OLLAMA_DISABLE_REASONING = os.getenv(
+    'OLLAMA_DISABLE_REASONING',
+    str(CUSTOM_OPENAI_DISABLE_REASONING),
+).lower() in ('1', 'true', 'yes', 'on')

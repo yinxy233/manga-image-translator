@@ -98,10 +98,13 @@ class Model48pxCTCOCR(OfflineOCR):
                     else:
                         cv2.imwrite(f'result/ocrs/{ix}.png', cv2.cvtColor(region[i, :, :, :], cv2.COLOR_RGB2BGR))
                 ix += 1
-            images = (torch.from_numpy(region).float() - 127.5) / 127.5
-            images = einops.rearrange(images, 'N H W C -> N C H W')
-            if self.use_gpu:
-                images = images.to(self.device)
+            images = einops.rearrange(torch.from_numpy(region), 'N H W C -> N C H W')
+            target_device = self.device if self.use_gpu else 'cpu'
+            images = images.to(
+                target_device,
+                non_blocking=target_device.startswith('cuda'),
+            )
+            images = images.float().sub_(127.5).div_(127.5)
             with torch.inference_mode():
                 texts = self.model.decode(images, widths, 0, verbose = verbose)
             for i, single_line in enumerate(texts):

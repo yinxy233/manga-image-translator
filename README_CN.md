@@ -456,6 +456,7 @@ shared              以 API 模式运行
 --port PORT           端口号（默认：8000）
 --start-instance      是否应自动启动翻译器实例
 --instances INSTANCES 要启动的内部翻译 worker 实例数量（默认：1）
+--recommended-client-concurrency N 经单/双 worker 基准批准的浏览器并发数（默认：1）
 --nonce NONCE         用于保护内部 Web 服务器通信的 Nonce
 --api-key API_KEY     用于保护公开翻译接口的可选 API Key
 --models-ttl MODELS_TTL  模型在内存中的 TTL（秒）（0 表示永远）
@@ -772,6 +773,7 @@ shared              以 API 模式运行
         "deepseek",
         "groq",
         "custom_openai",
+        "ollama",
         "offline",
         "nllb",
         "nllb_big",
@@ -893,6 +895,12 @@ shared              以 API 模式运行
     }
   },
   "properties": {
+    "performance_diagnostics": {
+      "default": false,
+      "description": "收集轻量结构化阶段耗时，不保存大型中间图片。",
+      "title": "Performance Diagnostics",
+      "type": "boolean"
+    },
     "filter_text": {
       "anyOf": [
         {
@@ -1124,6 +1132,7 @@ FIL: 菲律宾语（他加禄语）
 | papago        |         |         |                                                          |  
 | sakura        |         |         | 需要 `SAKURA_API_BASE`                               |  
 | custom_openai |         |         | 需要 `CUSTOM_OPENAI_API_BASE` `CUSTOM_OPENAI_MODEL` |  
+| ollama        |         | ✔️      | 使用本地原生 `/api/chat`；配置 `OLLAMA_MODEL`        |
 | offline       |         | ✔️      | 为语言选择最合适的离线翻译器    |  
 | nllb          |         | ✔️      | 离线翻译模型                                 |  
 | nllb_big      |         | ✔️      | 更大的NLLB模型                               |  
@@ -1197,6 +1206,11 @@ SAKURA_DICT_PATH=PATH_TO_YOUR_FILE
 | `CUSTOM_OPENAI_API_BASE`       | 自定义 OpenAI API 基础地址      | `http://localhost:11434/v1`          | 使用 OLLAMA_HOST 环境变量更改绑定 IP 和端口                                                           |  
 | `CUSTOM_OPENAI_MODEL`         | 自定义 OpenAI 兼容模型名称                                               | `''`                                 | 例如：`qwen2.5:7b`，使用前确保已拉取并运行                                                            |  
 | `CUSTOM_OPENAI_MODEL_CONF`    | 自定义 OpenAI 兼容模型配置                                               | `''`                                 | 例如：`qwen2`                                                                                        |
+| `OLLAMA_API_BASE`             | Ollama 原生 API 基础地址                                                  | `http://localhost:11434`              | 未设置时沿用 `CUSTOM_OPENAI_API_BASE` 并移除末尾 `/v1`                                                |
+| `OLLAMA_MODEL`                | Ollama 原生模型名称                                                       | `CUSTOM_OPENAI_MODEL`                 | 未设置时沿用已有的本地模型配置                                                                       |
+| `OLLAMA_KEEP_ALIVE`           | Ollama 模型驻留时长                                                       | `5m`                                  | 同时用于 `/api/chat` 与服务启动预热                                                                  |
+| `OLLAMA_CONTEXT_LENGTH`       | 用于文本区域分批的上下文长度                                             | `8192`                                | 只在完整文本区域之间切批                                                                             |
+| `OLLAMA_DISABLE_REASONING`    | 在模型支持时关闭思考输出                                                 | `false`                               | 未设置时沿用 `CUSTOM_OPENAI_DISABLE_REASONING`                                                        |
 
 
 **使用说明：**
@@ -1464,6 +1478,9 @@ json_sample:
 -   字体系列由 `--gimp-font` 参数单独控制。
 
 ## 后续计划
+
+本地 Ollama 部署的全链路性能验收方法，以及 AOT 窄图回归矩阵，见
+[docs/local-performance-benchmark.md](docs/local-performance-benchmark.md)。
 
 列一下以后完善这个项目需要做的事，欢迎贡献！
 

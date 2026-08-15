@@ -31,6 +31,17 @@ class MemoryTranslationCacheStore implements TranslationCacheStore {
   }
 }
 
+class BlockingMetadataCacheStore extends MemoryTranslationCacheStore {
+  blockPuts = false;
+
+  override async put(record: TranslationCacheRecord): Promise<void> {
+    if (this.blockPuts) {
+      return new Promise<void>(() => undefined);
+    }
+    return super.put(record);
+  }
+}
+
 function createDigestMock(): (algorithm: AlgorithmIdentifier, data: BufferSource) => Promise<ArrayBuffer> {
   return vi.fn(async (_algorithm, data) => {
     const bytes =
@@ -61,6 +72,19 @@ async function readBlobBytes(blob: Blob): Promise<Uint8Array> {
 }
 
 describe("TranslationResultCache", () => {
+  it("builds a cache key from a discovery hash without invoking digest again", () => {
+    const digest = createDigestMock();
+    const cache = new TranslationResultCache({
+      digest,
+      store: new MemoryTranslationCacheStore()
+    });
+
+    const key = cache.buildKeyFromHash("sha256:already-computed", DEFAULT_SETTINGS);
+
+    expect(key).toContain("sha256:already-computed|");
+    expect(digest).not.toHaveBeenCalled();
+  });
+
   it("builds a stable key from image bytes and translation config", async () => {
     const cache = new TranslationResultCache({
       digest: createDigestMock(),
@@ -146,6 +170,31 @@ describe("TranslationResultCache", () => {
     expect(cachedBlob).toBeInstanceOf(Blob);
     expect((cachedBlob as Blob).type).toBe("image/png");
     expect((await store.get("legacy"))?.blob.type).toBe("image/png");
+  });
+
+  it("serves a cache hit without waiting for LRU metadata writes", async () => {
+    const store = new BlockingMetadataCacheStore();
+    await store.put({
+      key: "ready",
+      blob: createPngBlob(),
+      createdAt: 1,
+      lastAccessedAt: 1,
+      byteSize: createPngBlob().size
+    });
+    store.blockPuts = true;
+    const cache = new TranslationResultCache({
+      digest: createDigestMock(),
+      store
+    });
+
+    const result = await Promise.race([
+      cache.get("ready"),
+      new Promise<never>((_resolve, reject) => {
+        window.setTimeout(() => reject(new Error("cache hit waited for metadata")), 100);
+      })
+    ]);
+
+    expect(result).toBeInstanceOf(Blob);
   });
 
   it("drops invalid cached blobs instead of reusing them", async () => {

@@ -1,8 +1,8 @@
 # Manga Image Translator Userscript
 
-这个目录提供一个独立的 Tampermonkey 油猴脚本工程，用于把远程部署的 `manga-image-translator` 服务接入任意漫画/图片站点。
+这个目录提供一个独立的 Tampermonkey 油猴脚本工程，用于把本地或远程部署的 `manga-image-translator` 服务接入任意漫画/图片站点。新安装默认连接 `http://127.0.0.1:8001` 并使用本地 Ollama；已有持久化设置不会被覆盖。
 
-This directory contains a standalone Tampermonkey userscript project for connecting arbitrary image-heavy sites to a remote `manga-image-translator` server.
+This directory contains a standalone Tampermonkey userscript project for connecting arbitrary image-heavy sites to a local or remote `manga-image-translator` server.
 
 ## Features
 
@@ -65,7 +65,7 @@ pnpm release:major
 
 ```bash
 cd server
-python main.py --host 0.0.0.0 --port 8000 --use-gpu --api-key "replace-with-a-strong-secret" --instances 2
+uv run python main.py --host 0.0.0.0 --port 8001 --use-gpu --api-key "replace-with-a-strong-secret" --instances 1
 ```
 
 ### Option 2: Environment Variable
@@ -73,7 +73,7 @@ python main.py --host 0.0.0.0 --port 8000 --use-gpu --api-key "replace-with-a-st
 ```bash
 export MT_PUBLIC_API_KEY="replace-with-a-strong-secret"
 cd server
-python main.py --host 0.0.0.0 --port 8000 --use-gpu --instances 2
+uv run python main.py --host 0.0.0.0 --port 8001 --use-gpu --instances 1
 ```
 
 ### Docker Example
@@ -81,21 +81,21 @@ python main.py --host 0.0.0.0 --port 8000 --use-gpu --instances 2
 ```bash
 docker run \
   --name manga_image_translator_gpu \
-  -p 8000:8000 \
+  -p 8001:8001 \
   --ipc=host \
   --gpus all \
   --entrypoint python \
   --rm \
   -e MT_PUBLIC_API_KEY='replace-with-a-strong-secret' \
   zyddnys/manga-image-translator:main \
-  server/main.py --verbose --host=0.0.0.0 --port=8000 --use-gpu
+  server/main.py --host=0.0.0.0 --port=8001 --use-gpu --instances=1
 ```
 
 ### Health Probe
 
 ```bash
-curl http://127.0.0.1:8000/health
-curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-size
+curl http://127.0.0.1:8001/health
+curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8001/queue-size
 ```
 
 `/health` 返回：
@@ -128,15 +128,16 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - `streamEndpoint`
 - `autoTranslateEnabled`
 - `cacheEnabled`
+- `performanceDiagnostics`
 - `maxConcurrency`
 - `adapterOverrides`
 
 推荐起始配置：
 
-- `serverBaseUrl`: 你的远程服务地址，例如 `https://translator.example.com`
+- `serverBaseUrl`: `http://127.0.0.1:8001`
 - `apiKey`: 与 `--api-key` 或 `MT_PUBLIC_API_KEY` 一致
 - `targetLanguage`: `CHS`
-- `translator`: `youdao`
+- `translator`: `ollama`
 - `detector`: `default`
 - `detectionSize`: `1536`
 - `boxThreshold`: `0.7`
@@ -146,9 +147,10 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 - `inpaintingSize`: `2048`
 - `maskDilationOffset`: `30`
 - `uploadTransport`: `multipart`
-- `streamEndpoint`: `standard`
+- `streamEndpoint`: `auto`
 - `cacheEnabled`: `true`
-- `maxConcurrency`: `2`
+- `performanceDiagnostics`: `false`
+- `maxConcurrency`: `1`
 - `adapterOverrides`: 保持默认，按站点逐个开启或关闭
 
 这些参数会映射到服务端 `config`：
@@ -166,13 +168,14 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8000/queue-si
 
 `streamEndpoint` 用于控制流式翻译接口：
 
-- `standard`: 默认值，走标准 `/stream` 接口，兼容性更稳妥。
+- `auto`: 默认值，先读取服务能力，支持时自动使用 Web 快路径，否则走标准 `/stream`。
+- `standard`: 固定走标准 `/stream` 接口，适合旧服务端。
 - `web-fast`: 走 `/stream/web` 快路径；当服务端支持该能力时，通常可以更早拿到 `final_ready` 结果。
 
-如果你希望多张图片同时翻译，需要同时满足两点：
+同一 GPU 默认保持一个 worker 和一个 Ollama 生成请求。只有基准证明双实例吞吐提升超过 10%、峰值 VRAM 不增加且单页 p95 不恶化时，才建议同时满足以下两点开启并发：
 
 - userscript 的 `maxConcurrency` 大于 `1`
-- 服务端通过 `--instances N` 启动了至少 `N` 个内部翻译 worker
+- 服务端通过 `--instances N` 启动了至少 `N` 个内部翻译 worker，并在基准通过后显式设置 `--recommended-client-concurrency N`
 
 ## Usage
 

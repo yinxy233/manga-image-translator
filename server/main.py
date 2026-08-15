@@ -16,11 +16,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
+from starlette.background import BackgroundTask
 
 from manga_translator import Config
 from server.auth import validate_public_api_key, is_protected_public_path
 from server.instance import ExecutorInstance, executor_instances
 from server.myqueue import task_queue
+from server.ollama_runtime import ollama_runtime
 from server.request_extraction import get_ctx, while_streaming, TranslateRequest, BatchTranslateRequest, get_batch_ctx
 from server.settings import ServerSettings, load_server_settings, resolve_app_version
 from server.to_json import to_translation, TranslationResponse
@@ -42,6 +44,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+def _result_folder_path(folder_name: str) -> Path:
+    """Resolve one direct result child while rejecting traversal and symlinks."""
+    candidate = (RESULT_ROOT / folder_name).resolve()
+    try:
+        relative = candidate.relative_to(RESULT_ROOT)
+    except ValueError as error:
+        raise HTTPException(404, detail="Result directory not found") from error
+    if len(relative.parts) != 1:
+        raise HTTPException(404, detail="Result directory not found")
+    return candidate
+
+
+@app.on_event("startup")
+async def warm_local_ollama() -> None:
+    """Begin model warmup after the HTTP application starts accepting work."""
+    ollama_runtime.schedule_warmup()
+
 # 添加result文件夹静态文件服务
 if RESULT_ROOT.exists():
     app.mount("/result", StaticFiles(directory=str(RESULT_ROOT)), name="result")
@@ -53,16 +73,26 @@ def build_health_payload() -> dict[str, object]:
     Returns:
         Health details used by userscript capability detection and queue hints.
     """
+    available_instance_limit = max(1, len(executor_instances.list))
+    recommended_concurrency = min(
+        2,
+        server_settings.recommended_client_concurrency,
+        available_instance_limit,
+    )
     return {
         "status": "ok",
         "version": server_settings.version,
         "queue_size": len(task_queue.queue),
         "total_instances": len(executor_instances.list),
         "free_instances": executor_instances.free_executors(),
+        "recommended_client_concurrency": recommended_concurrency,
         "capabilities": {
             "web_result_fastpath": True,
             "source_url_translation": True,
+            "ollama_native": True,
+            "performance_diagnostics": True,
         },
+        "ollama": ollama_runtime.snapshot(),
     }
 
 
@@ -86,9 +116,20 @@ async def public_api_key_middleware(request: Request, call_next):
 
 @app.post("/register", response_description="no response", tags=["internal-api"])
 async def register_instance(instance: ExecutorInstance, req: Request, req_nonce: str = Header(alias="X-Nonce")):
+    """Register one authenticated worker process with its callback nonce.
+
+    Args:
+        instance: Worker address and capacity advertised to the public service.
+        req: Internal worker registration request.
+        req_nonce: Shared launch nonce required on all worker callbacks.
+
+    Raises:
+        HTTPException: If the worker does not present the launch nonce.
+    """
     if req_nonce != nonce:
         raise HTTPException(401, detail="Invalid nonce")
     instance.ip = req.client.host
+    instance.nonce = req_nonce
     executor_instances.register(instance)
 
 
@@ -102,6 +143,10 @@ async def health() -> dict[str, object]:
     return build_health_payload()
 
 def transform_to_image(ctx):
+    """Return pre-encoded PNG bytes when the worker supplied them."""
+    encoded_result = getattr(ctx, 'result_png', None)
+    if encoded_result is not None:
+        return encoded_result
     # 检查是否使用占位符（在web模式下final.png保存后会设置此标记）
     if hasattr(ctx, 'use_placeholder') and ctx.use_placeholder:
         # ctx.result已经是1x1占位符图片，快速传输
@@ -132,12 +177,10 @@ async def bytes(req: Request, data: TranslateRequest):
 
 @app.post("/translate/image", response_description="the result image", tags=["api", "json"],response_class=StreamingResponse)
 async def image(req: Request, data: TranslateRequest) -> StreamingResponse:
+    """Translate a JSON image request and return one PNG response."""
+    data.config._image_result_only = True
     ctx = await get_ctx(req, data.config, data.image)
-    img_byte_arr = io.BytesIO()
-    ctx.result.save(img_byte_arr, format="PNG")
-    img_byte_arr.seek(0)
-
-    return StreamingResponse(img_byte_arr, media_type="image/png")
+    return StreamingResponse(io.BytesIO(transform_to_image(ctx)), media_type="image/png")
 
 @app.post("/translate/json/stream", response_class=StreamingResponse,tags=["api", "json"], response_description="A stream over elements with strucure(1byte status, 4 byte size, n byte data) status code are 0,1,2,3,4 0 is result data, 1 is progress report, 2 is error, 3 is waiting queue position, 4 is waiting for translator instance")
 async def stream_json(req: Request, data: TranslateRequest) -> StreamingResponse:
@@ -149,6 +192,8 @@ async def stream_bytes(req: Request, data: TranslateRequest)-> StreamingResponse
 
 @app.post("/translate/image/stream", response_class=StreamingResponse, tags=["api", "json"], response_description="A stream over elements with strucure(1byte status, 4 byte size, n byte data) status code are 0,1,2,3,4 0 is result data, 1 is progress report, 2 is error, 3 is waiting queue position, 4 is waiting for translator instance")
 async def stream_image(req: Request, data: TranslateRequest) -> StreamingResponse:
+    """Stream progress and a final PNG through the standard image endpoint."""
+    data.config._image_result_only = True
     return await while_streaming(req, transform_to_image, data.config, data.image)
 
 
@@ -156,6 +201,7 @@ async def stream_image(req: Request, data: TranslateRequest) -> StreamingRespons
 async def stream_image_web(req: Request, data: TranslateRequest) -> StreamingResponse:
     """Return the JSON streaming image response with Web fast-path enabled."""
     data.config._web_frontend_optimized = True
+    data.config._image_result_only = True
     return await while_streaming(req, transform_to_image, data.config, data.image)
 
 @app.post("/translate/with-form/json", response_model=TranslationResponse, tags=["api", "form"],response_description="json strucure inspired by the ichigo translator extension")
@@ -174,14 +220,12 @@ async def bytes_form(req: Request, image: UploadFile = File(...), config: str = 
 
 @app.post("/translate/with-form/image", response_description="the result image", tags=["api", "form"],response_class=StreamingResponse)
 async def image_form(req: Request, image: UploadFile = File(...), config: str = Form("{}")) -> StreamingResponse:
+    """Translate a multipart image request and return one PNG response."""
     img = await image.read()
     conf = Config.parse_raw(config)
+    conf._image_result_only = True
     ctx = await get_ctx(req, conf, img)
-    img_byte_arr = io.BytesIO()
-    ctx.result.save(img_byte_arr, format="PNG")
-    img_byte_arr.seek(0)
-
-    return StreamingResponse(img_byte_arr, media_type="image/png")
+    return StreamingResponse(io.BytesIO(transform_to_image(ctx)), media_type="image/png")
 
 @app.post("/translate/with-form/json/stream", response_class=StreamingResponse, tags=["api", "form"],response_description="A stream over elements with strucure(1byte status, 4 byte size, n byte data) status code are 0,1,2,3,4 0 is result data, 1 is progress report, 2 is error, 3 is waiting queue position, 4 is waiting for translator instance")
 async def stream_json_form(req: Request, image: UploadFile = File(...), config: str = Form("{}")) -> StreamingResponse:
@@ -206,6 +250,7 @@ async def stream_image_form(req: Request, image: UploadFile = File(...), config:
     conf = Config.parse_raw(config)
     # 标记为通用模式，不使用占位符优化
     conf._web_frontend_optimized = False
+    conf._image_result_only = True
     return await while_streaming(req, transform_to_image, conf, img)
 
 @app.post("/translate/with-form/image/stream/web", response_class=StreamingResponse, tags=["api", "form"], response_description="Web frontend optimized streaming endpoint - uses placeholder optimization for faster response.")
@@ -215,6 +260,7 @@ async def stream_image_form_web(req: Request, image: UploadFile = File(...), con
     conf = Config.parse_raw(config)
     # 标记为Web前端优化模式，使用占位符优化
     conf._web_frontend_optimized = True
+    conf._image_result_only = True
     return await while_streaming(req, transform_to_image, conf, img)
 
 @app.post("/queue-size", response_model=int, tags=["api", "json"])
@@ -229,7 +275,7 @@ async def get_result_by_folder(folder_name: str):
     if not result_dir.exists():
         raise HTTPException(404, detail="Result directory not found")
 
-    folder_path = result_dir / folder_name
+    folder_path = _result_folder_path(folder_name)
     if not folder_path.exists() or not folder_path.is_dir():
         raise HTTPException(404, detail=f"Folder {folder_name} not found")
 
@@ -237,14 +283,11 @@ async def get_result_by_folder(folder_name: str):
     if not final_png_path.exists():
         raise HTTPException(404, detail="final.png not found in folder")
 
-    async def file_iterator():
-        with open(final_png_path, "rb") as f:
-            yield f.read()
-
-    return StreamingResponse(
-        file_iterator(),
+    return FileResponse(
+        final_png_path,
         media_type="image/png",
-        headers={"Content-Disposition": f"inline; filename=final.png"}
+        filename="final.png",
+        content_disposition_type="inline",
     )
 
 @app.post("/translate/batch/json", response_model=list[TranslationResponse], tags=["api", "json", "batch"])
@@ -255,33 +298,40 @@ async def batch_json(req: Request, data: BatchTranslateRequest):
 
 @app.post("/translate/batch/images", response_description="Zip file containing translated images", tags=["api", "batch"])
 async def batch_images(req: Request, data: BatchTranslateRequest):
-    """Batch translate images and return zip archive containing translated images"""
+    """Batch translate images and return a ZIP of pre-encoded PNG results.
+
+    Args:
+        req: Incoming request used for disconnect-aware queue handling.
+        data: Images, translation configuration, and requested batch size.
+
+    Returns:
+        A streaming ZIP response containing one PNG for every completed image.
+    """
     import zipfile
     import tempfile
-    
+
+    data.config._image_result_only = True
     results = await get_batch_ctx(req, data.config, data.images, data.batch_size)
-    
-    # Create temporary ZIP file
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as tmp_file:
-        with zipfile.ZipFile(tmp_file, 'w') as zip_file:
-            for i, ctx in enumerate(results):
-                if ctx.result:
-                    img_byte_arr = io.BytesIO()
-                    ctx.result.save(img_byte_arr, format="PNG")
-                    zip_file.writestr(f"translated_{i+1}.png", img_byte_arr.getvalue())
-        
-        # Return ZIP file
-        with open(tmp_file.name, 'rb') as f:
-            zip_data = f.read()
-        
-        # Clean up temporary file
-        os.unlink(tmp_file.name)
-        
-        return StreamingResponse(
-            io.BytesIO(zip_data),
-            media_type="application/zip",
-            headers={"Content-Disposition": "attachment; filename=translated_images.zip"}
-        )
+
+    temporary_file = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
+    temporary_path = Path(temporary_file.name)
+    temporary_file.close()
+    try:
+        with zipfile.ZipFile(temporary_path, 'w') as zip_file:
+            for index, ctx in enumerate(results):
+                result_bytes = transform_to_image(ctx)
+                if result_bytes:
+                    zip_file.writestr(f"translated_{index + 1}.png", result_bytes)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+    return FileResponse(
+        temporary_path,
+        media_type="application/zip",
+        filename="translated_images.zip",
+        background=BackgroundTask(temporary_path.unlink, missing_ok=True),
+    )
 
 @app.get("/", response_class=HTMLResponse,tags=["ui"])
 async def index() -> HTMLResponse:
@@ -371,7 +421,10 @@ def start_translator_client_proc(
     base_path = os.path.dirname(os.path.abspath(__file__))
     parent = os.path.dirname(base_path)
     proc = subprocess.Popen(cmds, cwd=parent)
-    executor_instances.register(ExecutorInstance(ip=internal_host, port=port))
+    worker_nonce = None if nonce == "None" else nonce
+    executor_instances.register(
+        ExecutorInstance(ip=internal_host, port=port, nonce=worker_nonce)
+    )
 
     return proc
 
@@ -498,8 +551,7 @@ async def clear_results():
 @app.delete("/results/{folder_name}", tags=["api"])
 async def delete_result(folder_name: str):
     """Delete a specific result directory"""
-    result_dir = RESULT_ROOT
-    folder_path = result_dir / folder_name
+    folder_path = _result_folder_path(folder_name)
     
     if not folder_path.exists():
         raise HTTPException(404, detail="Result directory not found")
@@ -524,7 +576,10 @@ if __name__ == '__main__':
     from args import parse_arguments
 
     args = parse_arguments()
-    server_settings = load_server_settings(args.api_key)
+    server_settings = load_server_settings(
+        args.api_key,
+        args.recommended_client_concurrency,
+    )
     app.version = server_settings.version
     args.start_instance = True
     procs = prepare(args)

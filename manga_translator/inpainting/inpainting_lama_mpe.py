@@ -59,11 +59,8 @@ class LamaMPEInpainter(OfflineInpainter):
         del self.model
 
     async def _infer(self, image: np.ndarray, mask: np.ndarray, config: InpainterConfig, inpainting_size: int = 1024, verbose: bool = False) -> np.ndarray:
-        img_original = np.copy(image)
-        mask_original = np.copy(mask)
-        mask_original[mask_original < 127] = 0
-        mask_original[mask_original >= 127] = 1
-        mask_original = mask_original[:, :, None]
+        img_original = image
+        mask_original = np.greater_equal(mask, 127)[:, :, None]
 
         height, width, c = image.shape
         if max(image.shape[0: 2]) > inpainting_size:
@@ -106,17 +103,27 @@ class LamaMPEInpainter(OfflineInpainter):
 
         inference_h, inference_w = image.shape[:2]
         self.logger.info(f'Inpainting resolution: {inference_w}x{inference_h}')
+        non_blocking = self.device.startswith('cuda')
+        img_torch = (
+            torch.from_numpy(image)
+            .permute(2, 0, 1)
+            .unsqueeze_(0)
+            .to(self.device, non_blocking=non_blocking)
+            .float()
+        )
         if isinstance(self.model, LamaFourier):
-            img_torch = torch.from_numpy(image).permute(2, 0, 1).unsqueeze_(0).float() / 255.
+            img_torch.div_(255.0)
         else:
-            img_torch = torch.from_numpy(image).permute(2, 0, 1).unsqueeze_(0).float() / 127.5 - 1.0
-        mask_torch = torch.from_numpy(mask).unsqueeze_(0).unsqueeze_(0).float() / 255.0
-        mask_torch[mask_torch < 0.5] = 0
-        mask_torch[mask_torch >= 0.5] = 1
-        if self.device.startswith('cuda') or self.device == 'mps':
-            img_torch = img_torch.to(self.device)
-            mask_torch = mask_torch.to(self.device)
-        with torch.no_grad():
+            img_torch.div_(127.5).sub_(1.0)
+        mask_torch = (
+            torch.from_numpy(mask)
+            .unsqueeze_(0)
+            .unsqueeze_(0)
+            .to(self.device, non_blocking=non_blocking)
+            .ge_(128)
+            .to(dtype=torch.float32)
+        )
+        with torch.inference_mode():
             img_torch *= (1 - mask_torch)
             if not (self.device.startswith('cuda')):
                 # mps devices here
@@ -146,7 +153,8 @@ class LamaMPEInpainter(OfflineInpainter):
             img_inpainted = img_inpainted[crop_y, crop_x]
         if new_h != height or new_w != width:
             img_inpainted = cv2.resize(img_inpainted, (width, height), interpolation = cv2.INTER_LINEAR)
-        ans = img_inpainted * mask_original + img_original * (1 - mask_original)
+        ans = np.array(img_original, copy=True)
+        np.copyto(ans, img_inpainted, where=mask_original)
         return ans
     
 

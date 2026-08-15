@@ -1,7 +1,9 @@
 import type { QueueStats } from "../types";
 
+/** User-visible reason for ending queued or running work. */
 export type CancelReason = "canceled" | "ignored";
 
+/** One abortable unit managed by the bounded browser queue. */
 export interface QueueTask {
   id: string;
   run: (signal: AbortSignal) => Promise<void>;
@@ -28,6 +30,7 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }
 
+/** Small FIFO queue with bounded concurrency and abort-aware terminal states. */
 export class TaskQueue {
   private readonly tasks = new Map<string, QueueTaskRecord>();
 
@@ -45,9 +48,14 @@ export class TaskQueue {
     this.onStatsChange = options.onStatsChange;
   }
 
+  /** Add a new task or replace a terminal record when the user retries it. */
   enqueue(task: QueueTask): void {
-    if (this.tasks.has(task.id)) {
-      return;
+    const existing = this.tasks.get(task.id);
+    if (existing) {
+      if (existing.status === "queued" || existing.status === "running") {
+        return;
+      }
+      this.tasks.delete(task.id);
     }
 
     const record: QueueTaskRecord = {
@@ -64,15 +72,18 @@ export class TaskQueue {
     this.drain();
   }
 
+  /** Pause admission of queued tasks without canceling running work. */
   pause(): void {
     this.paused = true;
   }
 
+  /** Resume queued task admission. */
   resume(): void {
     this.paused = false;
     this.drain();
   }
 
+  /** Cancel every queued or running task while retaining terminal statistics. */
   clear(reason: CancelReason = "canceled"): void {
     for (const taskId of [...this.pendingOrder]) {
       this.cancel(taskId, reason);
@@ -84,6 +95,7 @@ export class TaskQueue {
     }
   }
 
+  /** Cancel tasks and discard all queue history. */
   reset(reason: CancelReason = "canceled"): void {
     this.clear(reason);
     this.pendingOrder.length = 0;
@@ -91,6 +103,7 @@ export class TaskQueue {
     this.emitStats();
   }
 
+  /** Cancel one task by identifier. */
   cancel(taskId: string, reason: CancelReason = "canceled"): void {
     const record = this.tasks.get(taskId);
     if (!record) {
@@ -115,11 +128,13 @@ export class TaskQueue {
     }
   }
 
+  /** Change the admission limit for future queue drains. */
   setMaxConcurrency(maxConcurrency: number): void {
     this.maxConcurrency = Math.max(1, maxConcurrency);
     this.drain();
   }
 
+  /** Return a snapshot of queue state counters. */
   getStats(): QueueStats {
     let queued = 0;
     let running = 0;
@@ -195,13 +210,15 @@ export class TaskQueue {
       .run(controller.signal)
       .then(() => {
         if (record.cancelReason) {
+          record.status = record.cancelReason;
+          record.onCancel?.(record.cancelReason);
           return;
         }
         record.status = "completed";
         record.onSuccess?.();
       })
       .catch((error: unknown) => {
-        if (isAbortError(error)) {
+        if (record.cancelReason || isAbortError(error)) {
           const reason = record.cancelReason ?? "canceled";
           record.status = reason;
           record.onCancel?.(reason);

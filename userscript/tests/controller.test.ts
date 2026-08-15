@@ -32,6 +32,7 @@ vi.mock("../src/storage", async () => {
 vi.mock("../src/cache", () => ({
   TranslationResultCache: class {
     buildKey = vi.fn();
+    buildKeyFromHash = vi.fn();
     get = vi.fn();
     set = vi.fn();
     clear = vi.fn();
@@ -84,7 +85,10 @@ vi.mock("../src/core/taskQueue", () => ({
   TaskQueue: class {
     constructor(_options: unknown) {}
 
-    enqueue(_task: unknown): void {}
+    enqueue(task: { onQueued?: () => void; onStart?: () => void }): void {
+      task.onQueued?.();
+      task.onStart?.();
+    }
 
     resume(): void {}
 
@@ -295,7 +299,7 @@ describe("TranslatorController image presentation", () => {
     const firstImage = createImage("https://example.com/page.png");
     const secondImage = createImage("https://example.com/page.png");
 
-    mockExtractImageBlobFromElement
+    mockFetchImageBlob
       .mockResolvedValueOnce(new Blob(["first-page"], { type: "image/png" }))
       .mockResolvedValueOnce(new Blob(["second-page"], { type: "image/png" }));
 
@@ -317,7 +321,7 @@ describe("TranslatorController image presentation", () => {
     expect(entries[0]?.shared.signature).not.toBe(entries[1]?.shared.signature);
   });
 
-  it("preserves discovery order when image hash preparation finishes out of order", async () => {
+  it("keeps source preparation bounded to one active image", async () => {
     const controller = asControllerInternals(new TranslatorController());
     controller.discoveryReady = true;
     const firstImage = createImage("https://example.com/page-1.png");
@@ -325,7 +329,7 @@ describe("TranslatorController image presentation", () => {
     const firstBlob = createDeferred<Blob>();
     const secondBlob = createDeferred<Blob>();
 
-    mockExtractImageBlobFromElement
+    mockFetchImageBlob
       .mockReturnValueOnce(firstBlob.promise)
       .mockReturnValueOnce(secondBlob.promise);
 
@@ -340,12 +344,14 @@ describe("TranslatorController image presentation", () => {
       adapterId: "generic"
     });
 
-    secondBlob.resolve(new Blob(["second-page"], { type: "image/png" }));
     await waitForAsyncDiscovery();
 
     expect(controller.imageEntries.size).toBe(0);
+    expect(mockFetchImageBlob).toHaveBeenCalledTimes(1);
 
     firstBlob.resolve(new Blob(["first-page"], { type: "image/png" }));
+    await waitForCondition(() => mockFetchImageBlob.mock.calls.length === 2);
+    secondBlob.resolve(new Blob(["second-page"], { type: "image/png" }));
     await waitForCondition(() => controller.imageEntries.size === 2);
 
     expect(Array.from(controller.imageEntries.values()).map((entry) => entry.sourceUrl)).toEqual([
@@ -354,7 +360,7 @@ describe("TranslatorController image presentation", () => {
     ]);
   });
 
-  it("delays the initial auto scan until the page load has settled", () => {
+  it("scans immediately once the DOM is interactive", () => {
     vi.useFakeTimers();
     vi.spyOn(document, "readyState", "get").mockReturnValue("interactive");
 
@@ -363,23 +369,18 @@ describe("TranslatorController image presentation", () => {
 
     expect(discovery?.rescan).not.toHaveBeenCalled();
 
-    window.dispatchEvent(new Event("load"));
-    vi.advanceTimersByTime(INITIAL_AUTO_TRANSLATE_SCAN_DELAY_MS - 1);
-
-    expect(discovery?.rescan).not.toHaveBeenCalled();
-
-    vi.advanceTimersByTime(1);
+    vi.advanceTimersByTime(INITIAL_AUTO_TRANSLATE_SCAN_DELAY_MS);
 
     expect(discovery?.reset).toHaveBeenCalledTimes(1);
     expect(discovery?.rescan).toHaveBeenCalledTimes(1);
   });
 
-  it("prefers already rendered image pixels before falling back to network fetch", async () => {
+  it("prefers original compressed bytes over rendered image pixels", async () => {
     const expectedBlob = new Blob(["page"], { type: "image/png" });
     const controller = asControllerInternals(new TranslatorController());
     const image = createImage("https://example.com/original.png");
 
-    mockExtractImageBlobFromElement.mockResolvedValue(expectedBlob);
+    mockFetchImageBlob.mockResolvedValue(expectedBlob);
 
     const sourceBlob = await controller.resolveSourceBlob({
       sourceUrl: "https://example.com/original.png",
@@ -387,17 +388,20 @@ describe("TranslatorController image presentation", () => {
     });
 
     expect(sourceBlob).toBe(expectedBlob);
-    expect(mockExtractImageBlobFromElement).toHaveBeenCalledWith(image);
-    expect(controller.transport.fetchImageBlob).not.toHaveBeenCalled();
+    expect(controller.transport.fetchImageBlob).toHaveBeenCalledWith(
+      "https://example.com/original.png",
+      undefined
+    );
+    expect(mockExtractImageBlobFromElement).not.toHaveBeenCalled();
   });
 
-  it("falls back to network fetch when DOM pixel extraction is unavailable", async () => {
-    const expectedBlob = new Blob(["fallback"], { type: "image/png" });
+  it("uses DOM pixels only after both network transports fail", async () => {
+    const expectedBlob = new Blob(["canvas-fallback"], { type: "image/png" });
     const controller = asControllerInternals(new TranslatorController());
     const image = createImage("https://example.com/original.png");
 
-    mockExtractImageBlobFromElement.mockResolvedValue(null);
-    mockFetchImageBlob.mockResolvedValue(expectedBlob);
+    mockFetchImageBlob.mockRejectedValue(new TypeError("blocked"));
+    mockExtractImageBlobFromElement.mockResolvedValue(expectedBlob);
 
     const sourceBlob = await controller.resolveSourceBlob({
       sourceUrl: "https://example.com/original.png",

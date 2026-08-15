@@ -1,6 +1,6 @@
 import type { HealthPayload, TranslationEvent, UserscriptSettings } from "../types";
 import { normalizeRenderedImageBlob } from "./image";
-import { decodeFrameText, readReadableStream, StreamFrameParser } from "./stream";
+import { decodeFrameText, StreamFrameParser } from "./stream";
 
 type FetchImpl = typeof fetch;
 type GMRequestFn = (details: GMRequestDetails<unknown>) => GMRequestHandle;
@@ -19,6 +19,7 @@ interface TranslateImageOptions {
 }
 
 interface TranslationConfigPayload {
+  performance_diagnostics: boolean;
   detector: {
     detector: UserscriptSettings["detector"];
     detection_size: number;
@@ -41,6 +42,7 @@ interface TranslationConfigPayload {
 
 type FinalReadyBlobResolver = ((folderName: string) => Promise<Blob>) | undefined;
 
+/** HTTP failure that must not trigger a different transport for the same task. */
 export class HttpStatusError extends Error {
   readonly status: number;
 
@@ -51,6 +53,13 @@ export class HttpStatusError extends Error {
     this.name = "HttpStatusError";
     this.status = status;
     this.body = body;
+  }
+}
+
+class TranslationExecutionError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "TranslationExecutionError";
   }
 }
 
@@ -100,6 +109,7 @@ function buildJsonHeaders(settings: UserscriptSettings): Record<string, string> 
 
 function buildTranslationConfigPayload(settings: UserscriptSettings): TranslationConfigPayload {
   return {
+    performance_diagnostics: settings.performanceDiagnostics,
     detector: {
       detector: settings.detector,
       detection_size: settings.detectionSize,
@@ -241,7 +251,7 @@ function shouldFallback(error: unknown): boolean {
   if (isAbortError(error)) {
     return false;
   }
-  return !(error instanceof HttpStatusError);
+  return !(error instanceof HttpStatusError || error instanceof TranslationExecutionError);
 }
 
 function useWebFastPath(settings: UserscriptSettings): boolean {
@@ -281,27 +291,45 @@ async function parseTranslationStream(
 ): Promise<Blob> {
   const parser = new StreamFrameParser();
   let resultBlob: Blob | null = null;
-  let finalReadyFolder: string | null = null;
+  let finalReadyPromise: Promise<Blob> | null = null;
+  // This parser is only entered after an HTTP 2xx response (or the equivalent
+  // GM load-start callback), which means the service has accepted the upload.
+  // Any later failure must surface instead of resubmitting the GPU/Ollama job.
+  const requestAccepted = true;
 
-  await readReadableStream(
-    stream,
-    (chunk) => {
+  const reader = stream.getReader();
+  try {
+    while (true) {
+      if (signal?.aborted) {
+        throw new DOMException("Request aborted", "AbortError");
+      }
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (!value) {
+        continue;
+      }
+      const chunk = value;
       const frames = parser.push(chunk);
       for (const frame of frames) {
         if (frame.code === 0) {
-          resultBlob = new Blob([Uint8Array.from(frame.data)], { type: "image/png" });
+          resultBlob = new Blob([frame.data], { type: "image/png" });
           continue;
         }
 
         const text = decodeFrameText(frame.data);
         if (frame.code === 2) {
-          throw new Error(text || "Translation failed");
+          throw new TranslationExecutionError(text || "Translation failed");
         }
 
         if (frame.code === 1 && text.startsWith("final_ready:")) {
           const folderName = text.slice("final_ready:".length).trim();
-          if (folderName) {
-            finalReadyFolder = folderName;
+          if (folderName && resolveFinalReadyBlob && !finalReadyPromise) {
+            // Start the download as soon as the worker publishes the atomic file.
+            // The stream may remain open briefly for its placeholder/result frame.
+            finalReadyPromise = resolveFinalReadyBlob(folderName);
+            void finalReadyPromise.catch(() => undefined);
           }
         }
 
@@ -311,32 +339,84 @@ async function parseTranslationStream(
           text
         });
       }
-    },
-    signal
-  );
+      if (finalReadyPromise) {
+        // The file is already atomically published. Do not wait for the
+        // placeholder frame or for the progress connection to close.
+        return await finalReadyPromise;
+      }
+    }
+  } catch (error) {
+    if (isAbortError(error) || error instanceof TranslationExecutionError) {
+      throw error;
+    }
+    if (requestAccepted) {
+      throw new TranslationExecutionError(
+        error instanceof Error ? error.message : "Accepted translation stream failed.",
+        { cause: error }
+      );
+    }
+    throw error;
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
 
-  if (finalReadyFolder && resolveFinalReadyBlob) {
+  if (finalReadyPromise) {
     // Web 快路径的最终帧只是 1x1 占位图；收到 final_ready 后必须直接读取后端已落盘的 final.png。
-    return resolveFinalReadyBlob(finalReadyFolder);
+    return finalReadyPromise;
   }
 
   if (!resultBlob) {
-    throw new Error("Translation stream finished without returning an image.");
+    const message = "Translation stream finished without returning an image.";
+    if (requestAccepted) {
+      throw new TranslationExecutionError(message);
+    }
+    throw new Error(message);
   }
 
   return resultBlob;
 }
 
+/** Parse a completed GM response through the same framed-stream semantics. */
+async function parseBufferedTranslationResponse(
+  responseValue: unknown,
+  onEvent: (event: TranslationEvent) => void,
+  signal?: AbortSignal,
+  resolveFinalReadyBlob?: (folderName: string) => Promise<Blob>
+): Promise<Blob> {
+  let bytes: Uint8Array;
+  if (responseValue instanceof Blob) {
+    bytes = new Uint8Array(await blobToArrayBuffer(responseValue));
+  } else if (responseValue instanceof ArrayBuffer) {
+    bytes = new Uint8Array(responseValue);
+  } else {
+    throw new TranslationExecutionError(
+      "Accepted GM translation did not expose a readable response body."
+    );
+  }
+
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    }
+  });
+  return parseTranslationStream(stream, onEvent, signal, resolveFinalReadyBlob);
+}
+
+/** Negotiates local image fetch, upload, streaming, and compatibility paths. */
 export class TransportClient {
   private readonly fetchImpl: FetchImpl;
 
   private readonly gmRequest: GMRequestFn;
+
+  private readonly healthCache = new Map<string, HealthPayload>();
 
   constructor(options: TransportClientOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.gmRequest = getGMRequest(options.gmRequest);
   }
 
+  /** Fetch and cache service capabilities through Fetch with a GM fallback. */
   async checkHealth(settings: UserscriptSettings, signal?: AbortSignal): Promise<HealthPayload> {
     try {
       const response = await this.fetchImpl(joinServerUrl(settings.serverBaseUrl, "/health"), {
@@ -347,15 +427,20 @@ export class TransportClient {
       if (!response.ok) {
         throw await toHttpStatusError(response);
       }
-      return (await response.json()) as HealthPayload;
+      const health = (await response.json()) as HealthPayload;
+      this.healthCache.set(settings.serverBaseUrl, health);
+      return health;
     } catch (error) {
       if (!shouldFallback(error)) {
         throw error;
       }
-      return this.checkHealthWithGM(settings, signal);
+      const health = await this.checkHealthWithGM(settings, signal);
+      this.healthCache.set(settings.serverBaseUrl, health);
+      return health;
     }
   }
 
+  /** Fetch original compressed bytes through Fetch, then GM when required. */
   async fetchImageBlob(imageUrl: string, signal?: AbortSignal): Promise<Blob> {
     try {
       const response = await this.fetchImpl(imageUrl, {
@@ -367,17 +452,51 @@ export class TransportClient {
         throw await toHttpStatusError(response);
       }
       return await response.blob();
-    } catch {
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw error;
+      }
       return this.fetchImageBlobWithGM(imageUrl, signal);
     }
   }
 
+  /** Translates one compressed source Blob using the negotiated server path. */
   async translateImage(options: TranslateImageOptions): Promise<Blob> {
-    if (options.settings.uploadTransport === "base64-json") {
-      return this.translateImageWithJsonTransport(options);
+    const settings = await this.resolveNegotiatedSettings(options.settings, options.signal);
+    const effectiveOptions = settings === options.settings ? options : { ...options, settings };
+
+    if (settings.uploadTransport === "base64-json") {
+      return this.translateImageWithJsonTransport(effectiveOptions);
     }
 
-    return this.translateImageWithMultipartTransport(options);
+    return this.translateImageWithMultipartTransport(effectiveOptions);
+  }
+
+  private async resolveNegotiatedSettings(
+    settings: UserscriptSettings,
+    signal?: AbortSignal
+  ): Promise<UserscriptSettings> {
+    if (settings.streamEndpoint !== "auto") {
+      return settings;
+    }
+
+    let health = this.healthCache.get(settings.serverBaseUrl);
+    if (!health) {
+      try {
+        health = await this.checkHealth(settings, signal);
+      } catch (error) {
+        if (isAbortError(error)) {
+          throw error;
+        }
+        // An older server may not expose /health capabilities. Its standard
+        // endpoint remains the compatibility path and will report real errors.
+      }
+    }
+
+    return {
+      ...settings,
+      streamEndpoint: health?.capabilities?.web_result_fastpath ? "web-fast" : "standard"
+    };
   }
 
   private async translateImageWithMultipartTransport(options: TranslateImageOptions): Promise<Blob> {
@@ -508,7 +627,12 @@ export class TransportClient {
     }
 
     if (!response.body) {
-      throw new Error("Translation response does not expose a readable stream.");
+      return parseBufferedTranslationResponse(
+        await response.arrayBuffer(),
+        options.onEvent,
+        options.signal,
+        this.resolveFinalReadyBlob(options.settings, options.signal)
+      );
     }
 
     return parseTranslationStream(
@@ -524,7 +648,8 @@ export class TransportClient {
     jsonPayload: string
   ): Promise<Blob> {
     return new Promise<Blob>((resolve, reject) => {
-      let streamStarted = false;
+      let headersReceived = false;
+      let streamParsingStarted = false;
 
       const request = this.gmRequest({
         method: "POST",
@@ -534,7 +659,7 @@ export class TransportClient {
         responseType: "stream",
         fetch: true,
         onloadstart: async (response) => {
-          streamStarted = true;
+          headersReceived = response.status >= 200;
 
           if (response.status >= 400) {
             reject(
@@ -544,10 +669,14 @@ export class TransportClient {
           }
 
           if (!(response.response instanceof ReadableStream)) {
-            reject(new Error("GM stream transport is unavailable in this browser."));
+            // Some userscript engines expose the same request only after it
+            // completes. Wait for onload and parse that buffered protocol body
+            // instead of issuing a duplicate translation request.
             return;
           }
 
+          headersReceived = true;
+          streamParsingStarted = true;
           try {
             const blob = await parseTranslationStream(
               response.response,
@@ -560,13 +689,34 @@ export class TransportClient {
             reject(error);
           }
         },
-        onload: () => {
-          if (!streamStarted) {
-            reject(new Error("GM stream transport ended before the stream started."));
+        onload: (response) => {
+          if (streamParsingStarted) {
+            return;
           }
+          headersReceived = true;
+          if (response.status >= 400) {
+            reject(
+              new HttpStatusError(response.status, response.responseText || `HTTP ${response.status}`)
+            );
+            return;
+          }
+          void parseBufferedTranslationResponse(
+            response.response,
+            options.onEvent,
+            options.signal,
+            this.resolveFinalReadyBlob(options.settings, options.signal)
+          ).then(resolve).catch(reject);
         },
-        onerror: () => reject(new Error("GM transport failed to reach the translation server.")),
-        ontimeout: () => reject(new Error("GM transport timed out."))
+        onerror: () => reject(
+          headersReceived
+            ? new TranslationExecutionError("Accepted GM translation connection failed.")
+            : new Error("GM transport failed to reach the translation server.")
+        ),
+        ontimeout: () => reject(
+          headersReceived
+            ? new TranslationExecutionError("Accepted GM translation timed out.")
+            : new Error("GM transport timed out.")
+        )
       });
 
       options.signal?.addEventListener("abort", () => request.abort(), { once: true });
@@ -637,7 +787,12 @@ export class TransportClient {
     }
 
     if (!response.body) {
-      throw new Error("Translation response does not expose a readable stream.");
+      return parseBufferedTranslationResponse(
+        await response.arrayBuffer(),
+        options.onEvent,
+        options.signal,
+        this.resolveFinalReadyBlob(options.settings, options.signal)
+      );
     }
 
     return parseTranslationStream(
@@ -656,7 +811,8 @@ export class TransportClient {
           options.fileName,
           options.settings
         );
-        let streamStarted = false;
+        let headersReceived = false;
+        let streamParsingStarted = false;
 
         const request = this.gmRequest({
           method: "POST",
@@ -666,7 +822,7 @@ export class TransportClient {
           responseType: "stream",
           fetch: true,
           onloadstart: async (response) => {
-            streamStarted = true;
+            headersReceived = response.status >= 200;
 
             if (response.status >= 400) {
               reject(
@@ -676,10 +832,13 @@ export class TransportClient {
             }
 
             if (!(response.response instanceof ReadableStream)) {
-              reject(new Error("GM stream transport is unavailable in this browser."));
+              // Preserve this accepted request and parse its buffered onload
+              // body; falling back with a second POST can duplicate generation.
               return;
             }
 
+            headersReceived = true;
+            streamParsingStarted = true;
             try {
               const blob = await parseTranslationStream(
                 response.response,
@@ -692,13 +851,34 @@ export class TransportClient {
               reject(error);
             }
           },
-          onload: () => {
-            if (!streamStarted) {
-              reject(new Error("GM stream transport ended before the stream started."));
+          onload: (response) => {
+            if (streamParsingStarted) {
+              return;
             }
+            headersReceived = true;
+            if (response.status >= 400) {
+              reject(
+                new HttpStatusError(response.status, response.responseText || `HTTP ${response.status}`)
+              );
+              return;
+            }
+            void parseBufferedTranslationResponse(
+              response.response,
+              options.onEvent,
+              options.signal,
+              this.resolveFinalReadyBlob(options.settings, options.signal)
+            ).then(resolve).catch(reject);
           },
-          onerror: () => reject(new Error("GM transport failed to reach the translation server.")),
-          ontimeout: () => reject(new Error("GM transport timed out."))
+          onerror: () => reject(
+            headersReceived
+              ? new TranslationExecutionError("Accepted GM translation connection failed.")
+              : new Error("GM transport failed to reach the translation server.")
+          ),
+          ontimeout: () => reject(
+            headersReceived
+              ? new TranslationExecutionError("Accepted GM translation timed out.")
+              : new Error("GM transport timed out.")
+          )
         });
 
         options.signal?.addEventListener("abort", () => request.abort(), { once: true });

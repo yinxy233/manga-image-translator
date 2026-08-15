@@ -1,5 +1,7 @@
 import asyncio
 import cv2
+import hashlib
+import io
 import json
 import langcodes
 import os
@@ -35,19 +37,38 @@ from .mask_refinement import dispatch as dispatch_mask_refinement
 from .inpainting import dispatch as dispatch_inpainting, prepare as prepare_inpainting, unload as unload_inpainting
 from .translators import (
     dispatch as dispatch_translation,
+    get_translator,
     prepare as prepare_translation,
     unload as unload_translation,
 )
 from .translators.common import ISO_639_1_TO_VALID_LANGUAGES
 from .colorization import dispatch as dispatch_colorization, prepare as prepare_colorization, unload as unload_colorization
 from .rendering import dispatch as dispatch_rendering, dispatch_eng_render, dispatch_eng_render_pillow
+from .benchmark_replay import (
+    JsonReplayStore,
+    apply_ocr_lines,
+    replay_mode,
+    replay_path,
+    serialize_ocr_lines,
+)
 
 # Will be overwritten by __main__.py if module is being run directly (with python -m)
 logger = logging.getLogger('manga_translator')
 
-# 全局console实例，用于日志重定向
-_global_console = None
-_log_console = None
+def _atomic_save_png(image: Image.Image, destination: str) -> None:
+    """Write a PIL image once and atomically publish the completed PNG.
+
+    Args:
+        image: Final image to encode.
+        destination: Final PNG filesystem path.
+    """
+    temporary_path = f"{destination}.{os.getpid()}.{time.time_ns()}.tmp"
+    try:
+        image.save(temporary_path, format="PNG")
+        os.replace(temporary_path, destination)
+    finally:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
 
 def set_main_logger(l):
     global logger
@@ -104,6 +125,7 @@ class MangaTranslator:
     batch_size: int
 
     def __init__(self, params: dict = None):
+        params = params or {}
         self.pre_dict = params.get('pre_dict', None)
         self.post_dict = params.get('post_dict', None)
         self.font_path = None
@@ -119,8 +141,6 @@ class MangaTranslator:
         self._progress_hooks = []
         self._add_logger_hook()
 
-        params = params or {}
-        
         self._batch_contexts = []  # 存储批量处理的上下文
         self._batch_configs = []   # 存储批量处理的配置
         self.disable_memory_optimization = params.get('disable_memory_optimization', False)
@@ -148,127 +168,36 @@ class MangaTranslator:
         self._current_image_context = None  # 存储当前处理图片的上下文信息
         self._saved_image_contexts = {}     # 存储批量处理中每个图片的上下文信息
         
-        # 设置日志文件
-        self._setup_log_file()
+        self._performance_trace = None
+
+        # Verbose mode is the only mode that writes a diagnostic file. Normal
+        # web workers no longer install handlers or mutate process-wide print.
+        if self.verbose:
+            self._setup_log_file()
 
     def _setup_log_file(self):
-        """设置日志文件，在result文件夹下创建带时间戳的log文件"""
+        """Attach one verbose file handler without redirecting global output."""
         try:
-            # 创建result目录
             result_dir = os.path.join(BASE_PATH, 'result')
             os.makedirs(result_dir, exist_ok=True)
-            
-            # 生成带时间戳的日志文件名
             from datetime import datetime
             timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-            log_filename = f"log_{timestamp}.txt"
+            log_filename = f"log_{timestamp}_{os.getpid()}.txt"
             log_path = os.path.join(result_dir, log_filename)
-            
-            # 配置文件日志处理器
+
             file_handler = logging.FileHandler(log_path, encoding='utf-8')
             file_handler.setLevel(logging.DEBUG)
-            # 使用自定义格式器，保持与控制台输出一致
             from .utils.log import Formatter
-            formatter = Formatter()
-            file_handler.setFormatter(formatter)
-            
-            # 添加到manga-translator根logger以捕获所有输出
+            file_handler.setFormatter(Formatter())
+
             mt_logger = logging.getLogger('manga-translator')
             mt_logger.addHandler(file_handler)
             if not mt_logger.level or mt_logger.level > logging.DEBUG:
                 mt_logger.setLevel(logging.DEBUG)
-            
-            # 保存日志文件路径供后续使用
             self._log_file_path = log_path
-            
-            # 简单的print重定向
-            import builtins
-            original_print = builtins.print
-            
-            def log_print(*args, **kwargs):
-                # 正常打印到控制台
-                original_print(*args, **kwargs)
-                # 同时写入日志文件
-                try:
-                    import io
-                    buffer = io.StringIO()
-                    original_print(*args, file=buffer, **kwargs)
-                    output = buffer.getvalue()
-                    if output.strip():
-                        with open(log_path, 'a', encoding='utf-8') as f:
-                            f.write(output)
-                except Exception:
-                    pass
-            
-            builtins.print = log_print
-            
-            # Rich Console输出重定向
-            try:
-                from rich.console import Console
-                import sys
-                
-                # 创建一个自定义的文件对象，同时写入控制台和日志文件
-                class TeeFile:
-                    def __init__(self, log_file_path, original_file):
-                        self.log_file_path = log_file_path
-                        self.original_file = original_file
-                    
-                    def write(self, text):
-                        # 写入原始输出
-                        self.original_file.write(text)
-                        # 写入日志文件
-                        try:
-                            if text.strip():
-                                with open(self.log_file_path, 'a', encoding='utf-8') as f:
-                                    f.write(text)
-                        except Exception:
-                            pass
-                        return len(text)
-                    
-                    def flush(self):
-                        self.original_file.flush()
-                    
-                    def __getattr__(self, name):
-                        return getattr(self.original_file, name)
-                
-                # 创建一个仅用于日志记录的Console（无颜色、无样式）
-                class LogOnlyFile:
-                    def __init__(self, log_file_path):
-                        self.log_file_path = log_file_path
-                    
-                    def write(self, text):
-                        try:
-                            if text.strip():
-                                with open(self.log_file_path, 'a', encoding='utf-8') as f:
-                                    f.write(text)
-                        except Exception:
-                            pass
-                        return len(text)
-                    
-                    def flush(self):
-                        pass
-                    
-                    def isatty(self):
-                        return False
-                
-                # 为日志创建纯文本console
-                log_file_only = LogOnlyFile(log_path)
-                log_console = Console(file=log_file_only, force_terminal=False, no_color=True, width=80)
-                
-                # 创建带颜色的控制台console
-                display_console = Console(force_terminal=True)
-                
-                # 全局设置console实例，供translator使用
-                global _global_console, _log_console
-                _global_console = display_console  # 控制台显示用
-                _log_console = log_console         # 日志记录用
-                
-            except Exception as e:
-                logger.debug(f"Failed to setup rich console logging: {e}")
-            
             logger.info(f"Log file created: {log_path}")
         except Exception as e:
-            print(f"Failed to setup log file: {e}")
+            logger.warning("Failed to set up verbose log file: %s", e)
 
     def parse_init_params(self, params: dict):
         self.verbose = params.get('verbose', False)
@@ -310,24 +239,28 @@ class MangaTranslator:
         
 
         
-    def _set_image_context(self, config: Config, image=None):
+    def _set_image_context(self, config: Config, image=None, source_digest: str | None = None):
         """设置当前处理图片的上下文信息，用于生成调试图片子文件夹"""
         from .utils.generic import get_image_md5
 
-        # 使用毫秒级时间戳确保唯一性
-        timestamp = str(int(time.time() * 1000))
+        # Include the process id because benchmark-approved dual workers may
+        # begin the same source image concurrently. Millisecond-only names can
+        # otherwise make two atomic final.png publications share a directory.
+        request_identity = f"{time.time_ns()}-{os.getpid()}"
         detection_size = str(getattr(config.detector, 'detection_size', 1024))
         target_lang = getattr(config.translator, 'target_lang', 'unknown')
         translator = getattr(config.translator, 'translator', 'unknown')
 
         # 计算图片MD5哈希值
-        if image is not None:
+        if source_digest:
+            file_md5 = source_digest[:8]
+        elif image is not None:
             file_md5 = get_image_md5(image)
         else:
             file_md5 = "unknown"
 
-        # 生成子文件夹名：{timestamp}-{file_md5}-{detection_size}-{target_lang}-{translator}
-        subfolder_name = f"{timestamp}-{file_md5}-{detection_size}-{target_lang}-{translator}"
+        # 生成子文件夹名：{request_identity}-{file_md5}-{detection_size}-{target_lang}-{translator}
+        subfolder_name = f"{request_identity}-{file_md5}-{detection_size}-{target_lang}-{translator}"
 
         self._current_image_context = {
             'subfolder': subfolder_name,
@@ -357,7 +290,7 @@ class MangaTranslator:
     def using_gpu(self):
         return self.device.startswith('cuda') or self.device == 'mps'
 
-    async def translate(self, image: Image.Image, config: Config, image_name: str = None, skip_context_save: bool = False) -> Context:
+    async def translate(self, image: Image.Image | bytes, config: Config, image_name: str = None, skip_context_save: bool = False) -> Context:
         """
         Translates a single image.
 
@@ -366,20 +299,47 @@ class MangaTranslator:
         :param image_name: Deprecated parameter, kept for compatibility.
         :return: Translation context.
         """
-        await self._report_progress('running_pre_translation_hooks')
-        for hook in self._progress_hooks:
+        if config.performance_diagnostics:
+            self._performance_trace = {
+                'started_ns': time.perf_counter_ns(),
+                'events': [],
+            }
+        else:
+            self._performance_trace = None
+
+        source_digest = None
+        if isinstance(image, bytes):
+            source_digest = hashlib.sha256(image).hexdigest()
+            if self._performance_trace:
+                self._performance_trace['events'].append({
+                    'state': 'source-hash',
+                    'elapsed_ms': (
+                        time.perf_counter_ns() - self._performance_trace['started_ns']
+                    ) / 1_000_000,
+                })
             try:
-                hook('running_pre_translation_hooks', False)
-            except Exception as e:
-                logger.error(f"Error in progress hook: {e}")
+                image = Image.open(io.BytesIO(image))
+                image.load()
+            except (OSError, ValueError) as error:
+                raise ValueError("Image payload could not be decoded in the model worker.") from error
+            if self._performance_trace:
+                self._performance_trace['events'].append({
+                    'state': 'decode',
+                    'elapsed_ms': (
+                        time.perf_counter_ns() - self._performance_trace['started_ns']
+                    ) / 1_000_000,
+                })
+
+        await self._report_progress('running_pre_translation_hooks')
 
         ctx = Context()
         ctx.input = image
+        ctx.source_digest = source_digest
         ctx.result = None
         ctx.verbose = self.verbose
 
         # 设置图片上下文以生成调试图片子文件夹
-        self._set_image_context(config, image)
+        self._set_image_context(config, image, source_digest)
         
         # 保存debug文件夹信息到Context中（用于Web模式的缓存访问）
         # 在web模式下总是保存，不仅仅是verbose模式
@@ -414,9 +374,16 @@ class MangaTranslator:
         # translate
         ctx = await self._translate(config, ctx)
 
+        if self._performance_trace:
+            ctx.performance_diagnostics = {
+                'total_ms': (time.perf_counter_ns() - self._performance_trace['started_ns']) / 1_000_000,
+                'events': list(self._performance_trace['events']),
+                'quality': dict(self._performance_trace.get('quality', {})),
+            }
+
         # 在翻译流程的最后保存翻译结果，确保保存的是最终结果（包括重试后的结果）
         # Save translation results at the end of translation process to ensure final results are saved
-        if not skip_context_save and ctx.text_regions:
+        if self.context_size > 0 and not skip_context_save and ctx.text_regions:
             # 汇总本页翻译，供下一页做上文
             page_translations = {r.text_raw if hasattr(r, "text_raw") else r.text: r.translation
                                  for r in ctx.text_regions}
@@ -476,6 +443,11 @@ class MangaTranslator:
             ctx.mask_raw = None
             ctx.mask = None
 
+        self._record_quality_fingerprint(
+            'detection_geometry',
+            [np.asarray(textline.pts).tolist() for textline in ctx.textlines],
+        )
+
         if self.verbose and ctx.mask_raw is not None:
             cv2.imwrite(self._result_path('mask_raw.png'), ctx.mask_raw)
 
@@ -500,6 +472,11 @@ class MangaTranslator:
             if not self.ignore_errors:  
                 raise 
             ctx.textlines = [] # Fallback to empty textlines if OCR fails
+
+        self._record_quality_fingerprint(
+            'ocr_text',
+            [str(getattr(textline, 'text', '')) for textline in ctx.textlines],
+        )
 
         if not ctx.textlines:
             await self._report_progress('skip-no-text', True)
@@ -538,6 +515,11 @@ class MangaTranslator:
                 logger.info(replacement)
         else:
             logger.info("No pre-translation replacements made.")
+
+        self._record_quality_fingerprint(
+            'merged_region_text',
+            [str(getattr(region, 'text', '')) for region in ctx.text_regions],
+        )
             
         # -- Translation
         await self._report_progress('translating')
@@ -551,6 +533,12 @@ class MangaTranslator:
 
         await self._report_progress('after-translating')
 
+        translated_regions = ctx.text_regions if isinstance(ctx.text_regions, list) else []
+        self._record_quality_fingerprint(
+            'postprocessed_translation',
+            [str(getattr(region, 'translation', '')) for region in translated_regions],
+        )
+
         if not ctx.text_regions:
             await self._report_progress('error-translating', True)
             ctx.result = ctx.upscaled
@@ -559,6 +547,13 @@ class MangaTranslator:
             await self._report_progress('cancelled', True)
             ctx.result = ctx.upscaled
             return await self._revert_upscale(config, ctx)
+
+        if getattr(self, '_is_streaming_mode', False):
+            # Translation no longer needs OCR crops or intermediate PIL aliases.
+            # Releasing them before mask/inpainting shortens the long-page peak.
+            ctx.textlines = None
+            ctx.img_colorized = None
+            ctx.upscaled = None
 
         # -- Mask refinement
         # (Delayed to take advantage of the region filtering done after ocr and translation)
@@ -578,6 +573,9 @@ class MangaTranslator:
             cv2.imwrite(self._result_path('inpaint_input.png'), cv2.cvtColor(inpaint_input_img, cv2.COLOR_RGB2BGR))
             cv2.imwrite(self._result_path('mask_final.png'), ctx.mask)
 
+        if getattr(self, '_is_streaming_mode', False):
+            ctx.mask_raw = None
+
         # -- Inpainting
         await self._report_progress('inpainting')
         try:
@@ -588,7 +586,10 @@ class MangaTranslator:
                 raise
             else:
                 ctx.img_inpainted = ctx.img_rgb
-        ctx.gimp_mask = np.dstack((cv2.cvtColor(ctx.img_inpainted, cv2.COLOR_RGB2BGR), ctx.mask))
+        # GIMP/PSD/PDF exports materialize this four-channel layer lazily.
+        ctx.gimp_mask = None
+        if getattr(self, '_is_streaming_mode', False):
+            ctx.mask = None
 
         if self.verbose:
             try:
@@ -616,7 +617,12 @@ class MangaTranslator:
                 raise
             ctx.img_rendered = ctx.img_inpainted # Fallback to inpainted (or original RGB) image if rendering fails
 
-        await self._report_progress('finished', True)
+        if getattr(self, '_is_streaming_mode', False):
+            for attribute in (
+                'img_rgb', 'mask', 'render_mask', 'img_inpainted',
+            ):
+                if attribute in ctx:
+                    ctx[attribute] = None
         ctx.result = dump_image(ctx.input, ctx.img_rendered, ctx.img_alpha)
 
         return await self._revert_upscale(config, ctx)
@@ -628,28 +634,46 @@ class MangaTranslator:
             await self._report_progress('downscaling')
             ctx.result = ctx.result.resize(ctx.input.size)
 
-        # 在verbose模式下保存final.png到调试文件夹
-        if ctx.result and self.verbose:
+        web_fast_path = bool(
+            ctx.result
+            and not self.result_sub_folder
+            and getattr(self, '_is_streaming_mode', False)
+        )
+        image_only = bool(getattr(config, '_image_result_only', False))
+        final_path = None
+        if ctx.result and (self.verbose or web_fast_path):
             try:
-                final_img = np.array(ctx.result)
-                if len(final_img.shape) == 3:  # 彩色图片，转换BGR顺序
-                    final_img = cv2.cvtColor(final_img, cv2.COLOR_RGB2BGR)
                 final_path = self._result_path('final.png')
-                success = cv2.imwrite(final_path, final_img)
-                if not success:
-                    logger.warning(f"Failed to save debug image: {final_path}")
+                _atomic_save_png(ctx.result, final_path)
             except Exception as e:
                 logger.error(f"Error saving final.png debug image: {e}")
                 logger.debug(f"Exception details: {traceback.format_exc()}")
+                if web_fast_path:
+                    raise
+
+        if web_fast_path:
+            await self._report_progress('png-encoded')
+        elif ctx.result and image_only:
+            if final_path:
+                with open(final_path, 'rb') as encoded_file:
+                    ctx.result_png = encoded_file.read()
+            else:
+                image_buffer = io.BytesIO()
+                ctx.result.save(image_buffer, format='PNG')
+                ctx.result_png = image_buffer.getvalue()
+            await self._report_progress('png-encoded')
+
+        await self._report_progress('finished', True)
+        if config.performance_diagnostics:
+            await self._report_progress(
+                'diagnostics:' + json.dumps(
+                    self._performance_diagnostic_snapshot(ctx),
+                    separators=(',', ':'),
+                )
+            )
 
         # Web流式模式优化：保存final.png并使用占位符
-        if ctx.result and not self.result_sub_folder and hasattr(self, '_is_streaming_mode') and self._is_streaming_mode:
-            # 保存final.png文件
-            final_img = np.array(ctx.result)
-            if len(final_img.shape) == 3:  # 彩色图片，转换BGR顺序
-                final_img = cv2.cvtColor(final_img, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(self._result_path('final.png'), final_img)
-
+        if web_fast_path and final_path:
             # 通知前端文件已就绪
             if hasattr(self, '_progress_hooks') and self._current_image_context:
                 folder_name = self._current_image_context['subfolder']
@@ -660,7 +684,16 @@ class MangaTranslator:
             placeholder = Image.new('RGB', (1, 1), color='white')
             ctx.result = placeholder
             ctx.use_placeholder = True
-            return ctx
+        if image_only:
+            for attribute in (
+                'input', 'img_colorized', 'upscaled', 'img_rgb', 'img_alpha',
+                'textlines', 'mask_raw', 'mask', 'render_mask', 'img_inpainted',
+                'img_rendered',
+            ):
+                if attribute in ctx:
+                    ctx[attribute] = None
+            if not web_fast_path:
+                ctx.result = None
 
         return ctx
 
@@ -749,7 +782,37 @@ class MangaTranslator:
             os.environ['MANGA_OCR_RESULT_DIR'] = ocr_result_dir
         
         try:
-            textlines = await dispatch_ocr(config.ocr.ocr, ctx.img_rgb, ctx.textlines, config.ocr, self.device, self.verbose)
+            mode = replay_mode('ocr')
+            if mode == 'off':
+                textlines = await dispatch_ocr(
+                    config.ocr.ocr, ctx.img_rgb, ctx.textlines,
+                    config.ocr, self.device, self.verbose
+                )
+            else:
+                replay_store = JsonReplayStore(replay_path(), 'ocr')
+                replay_key = replay_store.canonical_key({
+                    'source_digest': ctx.source_digest or (self._current_image_context or {}).get('file_md5'),
+                    'ocr': str(config.ocr.ocr),
+                    'regions': [textline.pts.tolist() for textline in ctx.textlines],
+                })
+                if mode == 'replay':
+                    textlines = apply_ocr_lines(
+                        ctx.textlines, replay_store.require(replay_key)
+                    )
+                else:
+                    textlines = await dispatch_ocr(
+                        config.ocr.ocr, ctx.img_rgb, ctx.textlines,
+                        config.ocr, self.device, self.verbose
+                    )
+                    if mode == 'record':
+                        replay_store.put(replay_key, serialize_ocr_lines(textlines))
+                    elif mode == 'verify':
+                        # Keep the real OCR cost in the benchmark while making
+                        # mutable text/color outputs deterministic.
+                        textlines = apply_ocr_lines(
+                            textlines,
+                            replay_store.require(replay_key),
+                        )
         finally:
             # 恢复环境变量
             if old_ocr_dir is not None:
@@ -1045,7 +1108,7 @@ class MangaTranslator:
                 return await translator._translate(ctx.from_lang, config.translator.target_lang, texts)
 
 
-        return await dispatch_translation(
+        translated = await dispatch_translation(
             config.translator.translator_gen,
             texts,
             config.translator,
@@ -1053,6 +1116,124 @@ class MangaTranslator:
             ctx,
             'cpu' if self._gpu_limited_memory else self.device
         )
+        self._accumulate_ollama_metrics(config, ctx)
+        return translated
+
+    def _accumulate_ollama_metrics(self, config: Config, ctx: Context) -> None:
+        """Merge the latest native request metrics into one page diagnostic."""
+        if not config.performance_diagnostics:
+            return
+        translator_key = getattr(
+            config.translator.translator, 'value', config.translator.translator
+        )
+        if translator_key not in {'ollama', 'custom_openai'}:
+            return
+        active_translator = get_translator(Translator(translator_key))
+        metrics = getattr(active_translator, 'last_metrics', None)
+        if not metrics:
+            return
+        accumulated = dict(getattr(ctx, 'ollama_metrics', None) or {})
+        for metric_name, metric_value in metrics.items():
+            accumulated[metric_name] = accumulated.get(metric_name, 0) + metric_value
+        ctx.ollama_metrics = accumulated
+
+    @staticmethod
+    def _correct_translation_punctuation(region: Any) -> None:
+        """Apply the existing source-aware bracket and quotation corrections."""
+        if not region.text or not region.translation:
+            return
+        check_items = (
+            ("(", "（", "「", "【"),
+            ("（", "(", "「", "【"),
+            (")", "）", "」", "】"),
+            ("）", ")", "」", "】"),
+            ("[", "［", "【", "「"),
+            ("［", "[", "【", "「"),
+            ("]", "］", "】", "」"),
+            ("］", "]", "】", "」"),
+            ("「", "“", "‘", "『", "【"),
+            ("」", "”", "’", "』", "】"),
+            ("『", "“", "‘", "「", "【"),
+            ("』", "”", "’", "」", "】"),
+            ("【", "(", "（", "「", "『", "["),
+            ("】", ")", "）", "」", "』", "]"),
+        )
+        replacement_items = (
+            ("「", "“"),
+            ("「", "‘"),
+            ("」", "”"),
+            ("」", "’"),
+            ("【", "["),
+            ("】", "]"),
+        )
+
+        if '『' in region.text and '』' in region.text:
+            quote_type = '『』'
+        elif '「' in region.text and '」' in region.text:
+            quote_type = '「」'
+        elif '【' in region.text and '】' in region.text:
+            quote_type = '【】'
+        else:
+            quote_type = None
+
+        if quote_type:
+            source_quote_count = region.text.count(quote_type[0])
+            destination_quote_count = region.translation.count('"')
+            destination_full_width_count = region.translation.count('＂')
+            if (
+                source_quote_count > 0
+                and source_quote_count in {
+                    destination_quote_count,
+                    destination_full_width_count,
+                }
+                and not region.translation.isascii()
+            ):
+                quote_replacements = {
+                    '「」': ('「', '」'),
+                    '『』': ('『', '』'),
+                    '【】': ('【', '】'),
+                }
+                left_quote, right_quote = quote_replacements[quote_type]
+                region.translation = re.sub(
+                    r'"([^\"]*)"',
+                    rf'{left_quote}\1{right_quote}',
+                    region.translation,
+                )
+
+        for variants in check_items:
+            source_standard_count = region.text.count(variants[0])
+            source_variant_count = sum(region.text.count(item) for item in variants[1:])
+            destination_standard_count = region.translation.count(variants[0])
+            destination_variant_count = sum(
+                region.translation.count(item) for item in variants[1:]
+            )
+            if (
+                source_standard_count > 0
+                and source_standard_count != source_variant_count
+                and source_standard_count
+                == destination_standard_count + destination_variant_count
+            ):
+                for variant in variants[1:]:
+                    region.translation = region.translation.replace(
+                        variant, variants[0]
+                    )
+
+        for replacement, variant in replacement_items:
+            region.translation = region.translation.replace(variant, replacement)
+
+    def _postprocess_retried_translation(
+        self,
+        region: Any,
+        config: Config,
+        post_dictionary: list[tuple[Any, str, int]],
+    ) -> None:
+        """Run a locally retried region through the same output transformations."""
+        if config.render.uppercase:
+            region.translation = region.translation.upper()
+        elif config.render.lowercase:
+            region.translation = region.translation.lower()
+        self._correct_translation_punctuation(region)
+        region.translation = apply_dictionary(region.translation, post_dictionary)
 
     async def _run_text_translation(self, config: Config, ctx: Context):
         # 检查text_regions是否为None或空
@@ -1120,85 +1301,9 @@ class MangaTranslator:
                 region._alignment = config.render.alignment  
                 region._direction = config.render.direction  
 
-        # Punctuation correction logic. for translators often incorrectly change quotation marks from the source language to those commonly used in the target language.
-        check_items = [
-            # 圆括号处理
-            ["(", "（", "「", "【"],
-            ["（", "(", "「", "【"],
-            [")", "）", "」", "】"],
-            ["）", ")", "」", "】"],
-            
-            # 方括号处理
-            ["[", "［", "【", "「"],
-            ["［", "[", "【", "「"],
-            ["]", "］", "】", "」"],
-            ["］", "]", "】", "」"],
-            
-            # 引号处理
-            ["「", "“", "‘", "『", "【"],
-            ["」", "”", "’", "』", "】"],
-            ["『", "“", "‘", "「", "【"],
-            ["』", "”", "’", "」", "】"],
-            
-            # 新增【】处理
-            ["【", "(", "（", "「", "『", "["],
-            ["】", ")", "）", "」", "』", "]"],
-        ]
-
-        replace_items = [
-            ["「", "“"],
-            ["「", "‘"],
-            ["」", "”"],
-            ["」", "’"],
-            ["【", "["],  
-            ["】", "]"],  
-        ]
-
+        # Preserve source-aware punctuation rules before applying post-dictionary.
         for region in ctx.text_regions:
-            if region.text and region.translation:
-                if '『' in region.text and '』' in region.text:
-                    quote_type = '『』'
-                elif '「' in region.text and '」' in region.text:
-                    quote_type = '「」'
-                elif '【' in region.text and '】' in region.text: 
-                    quote_type = '【】'
-                else:
-                    quote_type = None
-                
-                if quote_type:
-                    src_quote_count = region.text.count(quote_type[0])
-                    dst_dquote_count = region.translation.count('"')
-                    dst_fwquote_count = region.translation.count('＂')
-                    
-                    if (src_quote_count > 0 and
-                        (src_quote_count == dst_dquote_count or src_quote_count == dst_fwquote_count) and
-                        not region.translation.isascii()):
-                        
-                        if quote_type == '「」':
-                            region.translation = re.sub(r'"([^"]*)"', r'「\1」', region.translation)
-                        elif quote_type == '『』':
-                            region.translation = re.sub(r'"([^"]*)"', r'『\1』', region.translation)
-                        elif quote_type == '【】':  
-                            region.translation = re.sub(r'"([^"]*)"', r'【\1】', region.translation)
-
-                # === 优化后的数量判断逻辑 ===
-                # === Optimized quantity judgment logic ===
-                for v in check_items:
-                    num_src_std = region.text.count(v[0])
-                    num_src_var = sum(region.text.count(t) for t in v[1:])
-                    num_dst_std = region.translation.count(v[0])
-                    num_dst_var = sum(region.translation.count(t) for t in v[1:])
-                    
-                    if (num_src_std > 0 and
-                        num_src_std != num_src_var and
-                        num_src_std == num_dst_std + num_dst_var):
-                        for t in v[1:]:
-                            region.translation = region.translation.replace(t, v[0])
-
-                # 强制替换规则
-                # Forced replacement rules
-                for v in replace_items:
-                    region.translation = region.translation.replace(v[1], v[0])
+            self._correct_translation_punctuation(region)
 
         # 注意：翻译结果的保存移动到了翻译流程的最后，确保保存的是最终结果而不是重试前的结果
 
@@ -1256,59 +1361,12 @@ class MangaTranslator:
                 
                 if not page_lang_check_result:
                     logger.warning("Page-level target language ratio check failed")
-                    
-                    # 第二阶段：整个批次重新翻译逻辑
-                    max_batch_retry = config.translator.post_check_max_retry_attempts
-                    batch_retry_count = 0
-                    
-                    while batch_retry_count < max_batch_retry and not page_lang_check_result:
-                        batch_retry_count += 1
-                        logger.warning(f"Starting batch retry {batch_retry_count}/{max_batch_retry} for page-level target language check...")
-                        
-                        # 重新翻译所有区域
-                        original_texts = []
-                        for region in ctx.text_regions:
-                            if hasattr(region, 'text') and region.text:
-                                original_texts.append(region.text)
-                            else:
-                                original_texts.append("")
-                        
-                        if original_texts:
-                            try:
-                                # 重新批量翻译
-                                logger.info(f"Retrying translation for {len(original_texts)} regions...")
-                                new_translations = await self._batch_translate_texts(original_texts, config, ctx)
-                                
-                                # 更新翻译结果到regions
-                                for i, region in enumerate(ctx.text_regions):
-                                    if i < len(new_translations) and new_translations[i]:
-                                        old_translation = region.translation
-                                        region.translation = new_translations[i]
-                                        logger.debug(f"Region {i+1} translation updated: '{old_translation}' -> '{new_translations[i]}'")
-                                    
-                                # 重新检查目标语言比例
-                                logger.info(f"Re-checking page-level target language ratio after batch retry {batch_retry_count}...")
-                                page_lang_check_result = await self._check_target_language_ratio(
-                                    ctx.text_regions,
-                                    config.translator.target_lang,
-                                    min_ratio=0.5
-                                )
-                                
-                                if page_lang_check_result:
-                                    logger.info(f"Page-level target language check passed")
-                                    break
-                                else:
-                                    logger.warning(f"Page-level target language check still failed")
-                                    
-                            except Exception as e:
-                                logger.error(f"Error during batch retry {batch_retry_count}: {e}")
-                                break
-                        else:
-                            logger.warning("No text found for batch retry")
-                            break
-                    
+                    page_lang_check_result = await self._retry_target_language_failures(
+                        ctx,
+                        config,
+                    )
                     if not page_lang_check_result:
-                        logger.error(f"Page-level target language check failed after all {max_batch_retry} batch retries")
+                        logger.error("Page-level target language check failed after local retries")
                 else:
                     logger.info("Page-level target language ratio check passed")
             else:
@@ -1418,8 +1476,46 @@ class MangaTranslator:
         self._progress_hooks.append(ph)
 
     async def _report_progress(self, state: str, finished: bool = False):
+        """Publish progress and optionally append a monotonic diagnostic event."""
+        if self._performance_trace and not state.startswith('diagnostics:'):
+            self._performance_trace['events'].append({
+                'state': state,
+                'elapsed_ms': (
+                    time.perf_counter_ns() - self._performance_trace['started_ns']
+                ) / 1_000_000,
+            })
         for ph in self._progress_hooks:
             await ph(state, finished)
+
+    def _performance_diagnostic_snapshot(self, ctx: Context) -> dict[str, Any]:
+        """Build a compact JSON-safe snapshot for the optional progress frame."""
+        payload: dict[str, Any] = {}
+        if self._performance_trace:
+            payload['pipeline'] = {
+                'elapsed_ms': (
+                    time.perf_counter_ns() - self._performance_trace['started_ns']
+                ) / 1_000_000,
+                'events': list(self._performance_trace['events']),
+            }
+            payload['quality'] = dict(self._performance_trace.get('quality', {}))
+        if ctx.ollama_metrics:
+            payload['ollama'] = dict(ctx.ollama_metrics)
+        return payload
+
+    def _record_quality_fingerprint(self, stage: str, values: list[Any]) -> None:
+        """Record a privacy-preserving equality fingerprint for one stage."""
+        if not self._performance_trace:
+            return
+        encoded = json.dumps(
+            values,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(',', ':'),
+        ).encode('utf-8')
+        self._performance_trace.setdefault('quality', {})[stage] = {
+            'count': len(values),
+            'sha256': hashlib.sha256(encoded).hexdigest(),
+        }
 
     def _add_logger_hook(self):
         # TODO: Pass ctx to logger hook
@@ -1463,6 +1559,9 @@ class MangaTranslator:
         Returns:
             List of Context objects with translation results
         """
+        # Batch progress is shared by multiple contexts and intentionally does
+        # not reuse a previous page's optional diagnostic trace.
+        self._performance_trace = None
         batch_size = batch_size or self.batch_size
         if batch_size <= 1:
             # 不使用批量处理时，回到原来的逐个处理方式
@@ -1488,6 +1587,20 @@ class MangaTranslator:
         
         for i, (image, config) in enumerate(images_with_configs):
             logger.debug(f'Pre-processing image {i+1}/{len(images_with_configs)}')
+            source_digest = None
+            if isinstance(image, bytes):
+                source_digest = hashlib.sha256(image).hexdigest()
+                try:
+                    image = Image.open(io.BytesIO(image))
+                    image.load()
+                except (OSError, ValueError) as error:
+                    logger.error(f'Image {i+1} could not be decoded in the model worker: {error}')
+                    ctx = Context()
+                    ctx.input = None
+                    ctx.source_digest = source_digest
+                    ctx.text_regions = []
+                    pre_translation_contexts.append((ctx, config))
+                    continue
             
             # 简化的内存检查
             if memory_optimization_enabled:
@@ -1507,12 +1620,14 @@ class MangaTranslator:
                 
             try:
                 # 为批量处理中的每张图片设置上下文
-                self._set_image_context(config, image)
+                self._set_image_context(config, image, source_digest)
                 # 保存图片上下文，确保后处理阶段使用相同的文件夹
                 if self._current_image_context:
                     image_md5 = self._current_image_context['file_md5']
                     self._save_current_image_context(image_md5)
-                ctx = await self._translate_until_translation(image, config)
+                ctx = await self._translate_until_translation(
+                    image, config, source_digest=source_digest
+                )
                 # 保存图片上下文到Context对象中，用于后续批量处理
                 if self._current_image_context:
                     ctx.image_context = self._current_image_context.copy()
@@ -1539,12 +1654,14 @@ class MangaTranslator:
                         torch.cuda.empty_cache()
                     
                     # 重新设置图片上下文
-                    self._set_image_context(recovery_config, image)
+                    self._set_image_context(recovery_config, image, source_digest)
                     # 保存fallback图片上下文
                     if self._current_image_context:
                         image_md5 = self._current_image_context['file_md5']
                         self._save_current_image_context(image_md5)
-                    ctx = await self._translate_until_translation(image, recovery_config)
+                    ctx = await self._translate_until_translation(
+                        image, recovery_config, source_digest=source_digest
+                    )
                     # 保存图片上下文到Context对象中
                     if self._current_image_context:
                         ctx.image_context = self._current_image_context.copy()
@@ -1557,6 +1674,7 @@ class MangaTranslator:
                     # 创建空context作为占位符
                     ctx = Context()
                     ctx.input = image
+                    ctx.source_digest = source_digest
                     ctx.text_regions = []  # 确保text_regions被初始化为空列表
                     pre_translation_contexts.append((ctx, config))
             except Exception as e:
@@ -1564,6 +1682,7 @@ class MangaTranslator:
                 # 创建空context作为占位符
                 ctx = Context()
                 ctx.input = image
+                ctx.source_digest = source_digest
                 ctx.text_regions = []  # 确保text_regions被初始化为空列表
                 pre_translation_contexts.append((ctx, config))
         
@@ -1622,9 +1741,8 @@ class MangaTranslator:
                 if ctx.text_regions:
                     # 恢复预处理阶段保存的图片上下文，确保使用相同的文件夹
                     # 通过图片计算MD5来恢复上下文
-                    from .utils.generic import get_image_md5
                     image = ctx.input  # 从context中获取原始图片
-                    image_md5 = get_image_md5(image)
+                    image_md5 = ctx.image_context.get('file_md5') if ctx.image_context else None
                     if not self._restore_image_context(image_md5):
                         # 如果恢复失败，作为fallback重新设置（理论上不应该发生）
                         logger.warning(f"Failed to restore image context for MD5 {image_md5}, creating new context")
@@ -1640,7 +1758,7 @@ class MangaTranslator:
 
         # 批处理完成后，保存所有页面的最终翻译结果
         for ctx in results:
-            if ctx.text_regions:
+            if self.context_size > 0 and ctx.text_regions:
                 # 汇总本页翻译，供下一页做上文
                 page_translations = {r.text_raw if hasattr(r, "text_raw") else r.text: r.translation
                                      for r in ctx.text_regions}
@@ -1656,12 +1774,18 @@ class MangaTranslator:
         
         return results
 
-    async def _translate_until_translation(self, image: Image.Image, config: Config) -> Context:
+    async def _translate_until_translation(
+        self,
+        image: Image.Image,
+        config: Config,
+        source_digest: str | None = None,
+    ) -> Context:
         """
         执行翻译之前的所有步骤（彩色化、上采样、检测、OCR、文本行合并）
         """
         ctx = Context()
         ctx.input = image
+        ctx.source_digest = source_digest
         ctx.result = None
         
         # 保存原始输入图片用于调试
@@ -1882,67 +2006,14 @@ class MangaTranslator:
                         
                         if not batch_lang_check_result:
                             logger.warning("Batch-level target language ratio check failed")
-                            
-                            # 批次重新翻译逻辑
-                            max_batch_retry = sample_config.translator.post_check_max_retry_attempts
-                            batch_retry_count = 0
-                            
-                            while batch_retry_count < max_batch_retry and not batch_lang_check_result:
-                                batch_retry_count += 1
-                                logger.warning(f"Starting batch retry {batch_retry_count}/{max_batch_retry}")
-                                
-                                # 重新翻译批次内所有区域
-                                all_original_texts = []
-                                region_mapping = []  # 记录每个text属于哪个ctx
-                                
-                                for ctx_idx, (ctx, config) in enumerate(batch):
-                                    if ctx.text_regions:
-                                        for region in ctx.text_regions:
-                                            if hasattr(region, 'text') and region.text:
-                                                all_original_texts.append(region.text)
-                                                region_mapping.append((ctx_idx, region))
-                                
-                                if all_original_texts:
-                                    try:
-                                        # 重新批量翻译
-                                        logger.info(f"Retrying translation for {len(all_original_texts)} regions...")
-                                        new_translations = await self._batch_translate_texts(all_original_texts, sample_config, batch[0][0])
-                                        
-                                        # 更新翻译结果到各个region
-                                        for i, (ctx_idx, region) in enumerate(region_mapping):
-                                            if i < len(new_translations) and new_translations[i]:
-                                                old_translation = region.translation
-                                                region.translation = new_translations[i]
-                                                logger.debug(f"Region {i+1} translation updated: '{old_translation}' -> '{new_translations[i]}'")
-                                        
-                                        # 重新收集所有regions并检查目标语言比例
-                                        all_batch_regions = []
-                                        for ctx, config in batch:
-                                            if ctx.text_regions:
-                                                all_batch_regions.extend(ctx.text_regions)
-                                        
-                                        logger.info(f"Re-checking batch-level target language ratio after batch retry {batch_retry_count}...")
-                                        batch_lang_check_result = await self._check_target_language_ratio(
-                                            all_batch_regions,
-                                            sample_config.translator.target_lang,
-                                            min_ratio=0.5
-                                        )
-                                        
-                                        if batch_lang_check_result:
-                                            logger.info(f"Batch-level target language check passed")
-                                            break
-                                        else:
-                                            logger.warning(f"Batch-level target language check still failed")
-                                            
-                                    except Exception as e:
-                                        logger.error(f"Error during batch retry {batch_retry_count}: {e}")
-                                        break
-                                else:
-                                    logger.warning("No text found for batch retry")
-                                    break
-                            
+                            batch_lang_check_result = await self._retry_target_language_failures(
+                                batch[0][0],
+                                sample_config,
+                                text_regions=all_batch_regions,
+                                min_ratio=0.5,
+                            )
                             if not batch_lang_check_result:
-                                logger.error(f"Batch-level target language check failed after all {max_batch_retry} batch retries")
+                                logger.error("Batch-level target language check failed after local retries")
                     else:
                         logger.info(f"Skipping batch-level target language check: only {len(all_batch_regions)} regions (threshold: 10)")
                     
@@ -2077,50 +2148,14 @@ class MangaTranslator:
                     )
                     
                     if not page_lang_check_result:
-                        logger.warning(f"Page-level target language check failed for single image")
-                        
-                        # 单页重试逻辑
-                        max_retry = config.translator.post_check_max_retry_attempts
-                        retry_count = 0
-                        
-                        while retry_count < max_retry and not page_lang_check_result:
-                            retry_count += 1
-                            logger.info(f"Retrying single image translation {retry_count}/{max_retry}")
-                            
-                            # 重新翻译
-                            original_texts = [region.text for region in ctx.text_regions if hasattr(region, 'text') and region.text]
-                            if original_texts:
-                                try:
-                                    new_translations = await self._batch_translate_texts(original_texts, config, ctx)
-                                    
-                                    # 更新翻译结果
-                                    text_idx = 0
-                                    for region in ctx.text_regions:
-                                        if hasattr(region, 'text') and region.text and text_idx < len(new_translations):
-                                            old_translation = region.translation
-                                            region.translation = new_translations[text_idx]
-                                            logger.debug(f"Region translation updated: '{old_translation}' -> '{new_translations[text_idx]}'")
-                                            text_idx += 1
-                                    
-                                    # 重新检查
-                                    page_lang_check_result = await self._check_target_language_ratio(
-                                        ctx.text_regions,
-                                        config.translator.target_lang,
-                                        min_ratio=0.3
-                                    )
-                                    
-                                    if page_lang_check_result:
-                                        logger.info(f"Single image target language check passed after retry {retry_count}")
-                                        break
-                                        
-                                except Exception as e:
-                                    logger.error(f"Error during single image retry {retry_count}: {e}")
-                                    break
-                            else:
-                                break
-                        
+                        logger.warning("Page-level target language check failed for single image")
+                        page_lang_check_result = await self._retry_target_language_failures(
+                            ctx,
+                            config,
+                            min_ratio=0.3,
+                        )
                         if not page_lang_check_result:
-                            logger.warning(f"Single image target language check failed after all {max_retry} retries")
+                            logger.warning("Single image target language check failed after local retries")
                 
                 # 过滤逻辑
                 if ctx.text_regions:
@@ -2331,7 +2366,7 @@ class MangaTranslator:
 
         else:
             # 使用通用翻译调度器
-            return await dispatch_translation(
+            translated = await dispatch_translation(
                 config.translator.translator_gen,
                 texts,
                 config.translator,
@@ -2339,6 +2374,8 @@ class MangaTranslator:
                 ctx,
                 'cpu' if self._gpu_limited_memory else self.device
             )
+            self._accumulate_ollama_metrics(config, ctx)
+            return translated
             
     async def _apply_post_translation_processing(self, ctx: Context, config: Config) -> List:
         """
@@ -2348,83 +2385,8 @@ class MangaTranslator:
         if not ctx.text_regions:
             return []
             
-        check_items = [
-            # 圆括号处理
-            ["(", "（", "「", "【"],
-            ["（", "(", "「", "【"],
-            [")", "）", "」", "】"],
-            ["）", ")", "」", "】"],
-            
-            # 方括号处理
-            ["[", "［", "【", "「"],
-            ["［", "[", "【", "「"],
-            ["]", "］", "】", "」"],
-            ["］", "]", "】", "」"],
-            
-            # 引号处理
-            ["「", "“", "‘", "『", "【"],
-            ["」", "”", "’", "』", "】"],
-            ["『", "“", "‘", "「", "【"],
-            ["』", "”", "’", "」", "】"],
-            
-            # 新增【】处理
-            ["【", "(", "（", "「", "『", "["],
-            ["】", ")", "）", "」", "』", "]"],
-        ]
-
-        replace_items = [
-            ["「", "“"],
-            ["「", "‘"],
-            ["」", "”"],
-            ["」", "’"],
-            ["【", "["],  
-            ["】", "]"],  
-        ]
-
         for region in ctx.text_regions:
-            if region.text and region.translation:
-                # 引号处理逻辑
-                if '『' in region.text and '』' in region.text:
-                    quote_type = '『』'
-                elif '「' in region.text and '」' in region.text:
-                    quote_type = '「」'
-                elif '【' in region.text and '】' in region.text: 
-                    quote_type = '【】'
-                else:
-                    quote_type = None
-                
-                if quote_type:
-                    src_quote_count = region.text.count(quote_type[0])
-                    dst_dquote_count = region.translation.count('"')
-                    dst_fwquote_count = region.translation.count('＂')
-                    
-                    if (src_quote_count > 0 and
-                        (src_quote_count == dst_dquote_count or src_quote_count == dst_fwquote_count) and
-                        not region.translation.isascii()):
-                        
-                        if quote_type == '「」':
-                            region.translation = re.sub(r'"([^"]*)"', r'「\1」', region.translation)
-                        elif quote_type == '『』':
-                            region.translation = re.sub(r'"([^"]*)"', r'『\1』', region.translation)
-                        elif quote_type == '【】':  
-                            region.translation = re.sub(r'"([^"]*)"', r'【\1】', region.translation)
-
-                # 括号修正逻辑
-                for v in check_items:
-                    num_src_std = region.text.count(v[0])
-                    num_src_var = sum(region.text.count(t) for t in v[1:])
-                    num_dst_std = region.translation.count(v[0])
-                    num_dst_var = sum(region.translation.count(t) for t in v[1:])
-                    
-                    if (num_src_std > 0 and
-                        num_src_std != num_src_var and
-                        num_src_std == num_dst_std + num_dst_var):
-                        for t in v[1:]:
-                            region.translation = region.translation.replace(t, v[0])
-
-                # 强制替换规则
-                for v in replace_items:
-                    region.translation = region.translation.replace(v[1], v[0])
+            self._correct_translation_punctuation(region)
 
         # 注意：翻译结果的保存移动到了translate方法的最后，确保保存的是最终结果
 
@@ -2493,6 +2455,11 @@ class MangaTranslator:
             ctx.result = ctx.upscaled
             return await self._revert_upscale(config, ctx)
 
+        if getattr(self, '_is_streaming_mode', False):
+            ctx.textlines = None
+            ctx.img_colorized = None
+            ctx.upscaled = None
+
         # -- Mask refinement
         if ctx.mask is None:
             await self._report_progress('mask-generation')
@@ -2524,6 +2491,9 @@ class MangaTranslator:
                 logger.error(f"Error saving debug images (inpaint_input.png, mask_final.png): {e}")
                 logger.debug(f"Exception details: {traceback.format_exc()}")
 
+        if getattr(self, '_is_streaming_mode', False):
+            ctx.mask_raw = None
+
         # -- Inpainting
         await self._report_progress('inpainting')
         try:
@@ -2535,7 +2505,9 @@ class MangaTranslator:
                 raise
             else:
                 ctx.img_inpainted = ctx.img_rgb
-        ctx.gimp_mask = np.dstack((cv2.cvtColor(ctx.img_inpainted, cv2.COLOR_RGB2BGR), ctx.mask))
+        ctx.gimp_mask = None
+        if getattr(self, '_is_streaming_mode', False):
+            ctx.mask = None
 
         if self.verbose:
             try:
@@ -2564,7 +2536,12 @@ class MangaTranslator:
                 raise
             ctx.img_rendered = ctx.img_inpainted
 
-        await self._report_progress('finished', True)
+        if getattr(self, '_is_streaming_mode', False):
+            for attribute in (
+                'img_rgb', 'mask', 'render_mask', 'img_inpainted',
+            ):
+                if attribute in ctx:
+                    ctx[attribute] = None
         ctx.result = dump_image(ctx.input, ctx.img_rendered, ctx.img_alpha)
         
         # 保存debug文件夹信息到Context中（用于Web模式的缓存访问）
@@ -2687,6 +2664,162 @@ class MangaTranslator:
         
         return is_target_lang
 
+    def _find_target_language_mismatches(self, text_regions: List, target_lang: str) -> List:
+        """Return regions individually classified as a non-target language.
+
+        Unknown/very short strings are not retried solely because a page-level
+        aggregate check failed; this prevents resubmitting already valid bubbles.
+        """
+        mismatches = []
+        expected_language = target_lang.upper()
+        for region in text_regions:
+            translation = getattr(region, 'translation', '').strip()
+            if len(translation) < 4:
+                continue
+            try:
+                detected_code, _ = langid.classify(translation)
+            except Exception:
+                continue
+            detected_language = ISO_639_1_TO_VALID_LANGUAGES.get(detected_code)
+            if detected_language and detected_language.upper() != expected_language:
+                mismatches.append(region)
+        return mismatches
+
+    async def _retry_target_language_failures(
+        self,
+        ctx: Context,
+        config: Config,
+        *,
+        text_regions: List | None = None,
+        min_ratio: float = 0.5,
+    ) -> bool:
+        """Select the native Ollama retry path without changing other backends."""
+        translator_key = getattr(
+            config.translator.translator,
+            'value',
+            config.translator.translator,
+        )
+        if translator_key == 'ollama':
+            return await self._retry_target_language_mismatches(
+                ctx,
+                config,
+                text_regions=text_regions,
+                min_ratio=min_ratio,
+            )
+        return await self._retry_all_target_language_regions(
+            ctx,
+            config,
+            text_regions=text_regions,
+            min_ratio=min_ratio,
+        )
+
+    async def _retry_all_target_language_regions(
+        self,
+        ctx: Context,
+        config: Config,
+        *,
+        text_regions: List | None = None,
+        min_ratio: float = 0.5,
+    ) -> bool:
+        """Preserve full-region retries for non-Ollama translator backends."""
+        regions = ctx.text_regions if text_regions is None else text_regions
+        max_attempts = config.translator.post_check_max_retry_attempts
+        for attempt in range(max_attempts):
+            region_mapping = [
+                region
+                for region in regions
+                if getattr(region, 'text', None)
+            ]
+            if not region_mapping:
+                break
+            logger.warning(
+                "Retrying all %d regions for legacy backend (attempt %d/%d).",
+                len(region_mapping),
+                attempt + 1,
+                max_attempts,
+            )
+            try:
+                new_translations = await self._batch_translate_texts(
+                    [region.text for region in region_mapping],
+                    config,
+                    ctx,
+                )
+            except Exception as error:
+                logger.error(
+                    "Error during full-region target language retry: %s",
+                    error,
+                )
+                break
+            for region, translation in zip(region_mapping, new_translations):
+                if translation:
+                    region.translation = translation
+            if await self._check_target_language_ratio(
+                regions,
+                config.translator.target_lang,
+                min_ratio=min_ratio,
+            ):
+                return True
+        return await self._check_target_language_ratio(
+            regions,
+            config.translator.target_lang,
+            min_ratio=min_ratio,
+        )
+
+    async def _retry_target_language_mismatches(
+        self,
+        ctx: Context,
+        config: Config,
+        *,
+        text_regions: List | None = None,
+        min_ratio: float = 0.5,
+    ) -> bool:
+        """Retry only regions identified as non-target-language output.
+
+        Args:
+            ctx: Translation context used for prompt history and diagnostics.
+            config: Active page or batch configuration.
+            text_regions: Optional aggregate region list for a multi-page batch.
+            min_ratio: Existing quality threshold to preserve for the caller.
+
+        Returns:
+            Whether the complete caller-provided region set now passes.
+        """
+        regions = ctx.text_regions if text_regions is None else text_regions
+        max_attempts = config.translator.post_check_max_retry_attempts
+        post_dictionary = load_dictionary(getattr(self, 'post_dict', None))
+        for attempt in range(max_attempts):
+            failed_regions = self._find_target_language_mismatches(
+                regions, config.translator.target_lang
+            )
+            if not failed_regions:
+                logger.warning(
+                    "Page language check failed, but no individual region was a safe retry candidate."
+                )
+                break
+            logger.warning(
+                "Retrying %d failed regions only (attempt %d/%d).",
+                len(failed_regions), attempt + 1, max_attempts,
+            )
+            new_translations = await self._batch_translate_texts(
+                [region.text for region in failed_regions], config, ctx
+            )
+            for region, translation in zip(failed_regions, new_translations):
+                if not translation:
+                    continue
+                region.translation = translation
+                self._postprocess_retried_translation(
+                    region,
+                    config,
+                    post_dictionary,
+                )
+            if await self._check_target_language_ratio(
+                regions, config.translator.target_lang, min_ratio=min_ratio
+            ):
+                return True
+        return await self._check_target_language_ratio(
+            regions, config.translator.target_lang, min_ratio=min_ratio
+        )
+
     async def _validate_translation(self, original_text: str, translation: str, target_lang: str, config, ctx: Context = None, silent: bool = False, page_lang_check_result: bool = None) -> bool:
         """
         验证翻译质量（包含目标语言比例检查和幻觉检测）
@@ -2733,6 +2866,7 @@ class MangaTranslator:
         """
         original_translation = region.translation
         max_attempts = config.translator.post_check_max_retry_attempts
+        post_dictionary = load_dictionary(getattr(self, 'post_dict', None))
         
         for attempt in range(max_attempts):
             # 验证当前翻译 - 在重试过程中只检查单个region（幻觉检测），不进行页面级检查
@@ -2767,14 +2901,14 @@ class MangaTranslator:
                             ctx,
                             'cpu' if self._gpu_limited_memory else self.device
                         )
+                        self._accumulate_ollama_metrics(config, ctx)
                         if retranslated:
                             region.translation = retranslated[0]
-                            
-                            # 应用格式化处理
-                            if config.render.uppercase:
-                                region.translation = region.translation.upper()
-                            elif config.render.lowercase:
-                                region.translation = region.translation.lower()
+                            self._postprocess_retried_translation(
+                                region,
+                                config,
+                                post_dictionary,
+                            )
                                 
                             logger.info(f'Re-translation finished: "{region.text}" -> "{region.translation}"')
                         else:

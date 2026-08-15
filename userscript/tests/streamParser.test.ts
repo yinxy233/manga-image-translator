@@ -32,4 +32,18 @@ describe("StreamFrameParser", () => {
     expect(second).toHaveLength(1);
     expect(decodeFrameText(second[0].data)).toBe("rendering");
   });
+
+  it("parses a large frame delivered one byte at a time", () => {
+    const parser = new StreamFrameParser();
+    const text = "长图结果".repeat(20_000);
+    const frame = createFrame(1, text);
+    const frames = [];
+
+    for (const byte of frame) {
+      frames.push(...parser.push(Uint8Array.of(byte)));
+    }
+
+    expect(frames).toHaveLength(1);
+    expect(decodeFrameText(frames[0].data)).toBe(text);
+  });
 });

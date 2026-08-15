@@ -1,5 +1,4 @@
 from typing import Optional, List
-
 import py3langid as langid
 
 from .common import *
@@ -25,6 +24,7 @@ from .groq import GroqTranslator
 from .gemini import GeminiTranslator
 from .gemini_2stage import Gemini2StageTranslator
 from .custom_openai import CustomOpenAiTranslator
+from .ollama import OllamaTranslator
 from ..config import Translator, TranslatorConfig, TranslatorChain
 from ..utils import Context
 
@@ -48,6 +48,7 @@ GPT_TRANSLATORS = {
     Translator.deepseek: DeepseekTranslator,
     Translator.groq:GroqTranslator,
     Translator.custom_openai: CustomOpenAiTranslator,
+    Translator.ollama: OllamaTranslator,
     Translator.gemini: GeminiTranslator,
     Translator.gemini_2stage: Gemini2StageTranslator,
 }
@@ -69,11 +70,11 @@ TRANSLATORS = {
 translator_cache = {}
 
 def get_translator(key: Translator, *args, **kwargs) -> CommonTranslator:
+    """Return one process-local translator instance for the selected backend."""
     if key not in TRANSLATORS:
         raise ValueError(f'Could not find translator for: "{key}". Choose from the following: %s' % ','.join(TRANSLATORS))
     if not translator_cache.get(key):
-        translator = TRANSLATORS[key]
-        translator_cache[key] = translator(*args, **kwargs)
+        translator_cache[key] = TRANSLATORS[key](*args, **kwargs)
     return translator_cache[key]
 
 prepare_selective_translator(get_translator)

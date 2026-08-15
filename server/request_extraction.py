@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from manga_translator import Config
 from server.myqueue import BatchQueueElement, QueueElement, task_queue, wait_in_queue
+from server.ollama_runtime import ollama_runtime
 from server.streaming import notify, stream
 
 
@@ -87,6 +88,27 @@ def _open_image_from_bytes(image_bytes: bytes) -> Image.Image:
         _raise_invalid_image("Image payload could not be decoded.", error)
 
 
+def _validate_image_bytes(image_bytes: bytes) -> bytes:
+    """Validate encoded image structure without materializing its pixel buffer.
+
+    Args:
+        image_bytes: Raw compressed image payload.
+
+    Returns:
+        The original byte object so it can pass through the process queue
+        without an additional copy.
+
+    Raises:
+        HTTPException: Raised when Pillow cannot identify or verify the image.
+    """
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            image.verify()
+    except (UnidentifiedImageError, OSError) as error:
+        _raise_invalid_image("Image payload could not be decoded.", error)
+    return image_bytes
+
+
 async def _fetch_remote_image_bytes(image_url: str) -> bytes:
     """Fetch an image from a public remote URL.
 
@@ -134,19 +156,54 @@ async def to_pil_image(image: str | bytes) -> Image.Image:
     Raises:
         HTTPException: Raised when the payload is invalid or cannot be fetched.
     """
+    return _open_image_from_bytes(await to_image_bytes(image))
+
+
+async def to_image_bytes(image: str | bytes) -> bytes:
+    """Resolve a request image to validated compressed bytes.
+
+    This is the preferred server path. Pixel decoding is intentionally left to
+    the model worker so a large upload is fully decoded exactly once.
+
+    Args:
+        image: Raw bytes, data URL, or remote HTTP(S) URL.
+
+    Returns:
+        Validated compressed image bytes.
+
+    Raises:
+        HTTPException: Raised when the payload is invalid or cannot be fetched.
+    """
     if isinstance(image, builtins.bytes):
-        return _open_image_from_bytes(image)
+        return _validate_image_bytes(image)
 
     if DATA_URL_PATTERN.match(image):
         encoded_value = image.split(",", 1)[1]
         try:
-            image_data = b64decode(encoded_value)
+            image_data = b64decode(encoded_value, validate=True)
         except ValueError as error:
             _raise_invalid_image("Image data URL is not valid base64.", error)
-        return _open_image_from_bytes(image_data)
+        return _validate_image_bytes(image_data)
 
     remote_image_bytes = await _fetch_remote_image_bytes(image)
-    return _open_image_from_bytes(remote_image_bytes)
+    return _validate_image_bytes(remote_image_bytes)
+
+
+async def _prefer_native_local_ollama(config: Config) -> None:
+    """Switch legacy local ``custom_openai`` requests only after a native probe."""
+    translator_config = getattr(config, 'translator', None)
+    selected = getattr(translator_config, 'translator', None)
+    selected_value = getattr(selected, 'value', selected)
+    if selected_value == 'ollama':
+        # Serialize the first translation behind startup model residency so the
+        # warmup and real generation do not contend for the same local GPU.
+        await ollama_runtime.ensure_probed()
+        return
+    if selected_value != 'custom_openai':
+        return
+    if await ollama_runtime.ensure_probed():
+        config.translator.translator = 'ollama'
+        config.translator._translator_gen = None
 
 
 async def get_ctx(req: Request, config: Config, image: str | bytes) -> Any:
@@ -160,9 +217,10 @@ async def get_ctx(req: Request, config: Config, image: str | bytes) -> Any:
     Returns:
         The translated execution context returned by the worker queue.
     """
-    pil_image = await to_pil_image(image)
+    image_bytes = await to_image_bytes(image)
+    await _prefer_native_local_ollama(config)
 
-    task = QueueElement(req, pil_image, config, 0)
+    task = QueueElement(req, image_bytes, config, len(image_bytes))
     task_queue.add_task(task)
 
     return await wait_in_queue(task, None)
@@ -185,12 +243,14 @@ async def while_streaming(
     Returns:
         A streaming response over the shared queue protocol.
     """
-    pil_image = await to_pil_image(image)
+    image_bytes = await to_image_bytes(image)
+    await _prefer_native_local_ollama(config)
 
-    task = QueueElement(req, pil_image, config, 0)
+    task = QueueElement(req, image_bytes, config, len(image_bytes))
     task_queue.add_task(task)
 
     messages: asyncio.Queue[bytes] = asyncio.Queue()
+    response_closed = asyncio.Event()
 
     def notify_internal(code: int, data: bytes) -> None:
         """Forward queue notifications into the streaming response buffer.
@@ -199,9 +259,12 @@ async def while_streaming(
             code: Queue protocol status code.
             data: Queue protocol payload.
         """
-        notify(code, data, transform, messages)
+        notify(code, data, transform, messages, response_closed)
 
-    streaming_response = StreamingResponse(stream(messages), media_type="application/octet-stream")
+    streaming_response = StreamingResponse(
+        stream(messages, response_closed),
+        media_type="application/octet-stream",
+    )
     asyncio.create_task(wait_in_queue(task, notify_internal))
     return streaming_response
 
@@ -223,9 +286,10 @@ async def get_batch_ctx(
     Returns:
         The translated batch result from the worker queue.
     """
-    pil_images = [await to_pil_image(image) for image in images]
+    encoded_images = [await to_image_bytes(image) for image in images]
+    await _prefer_native_local_ollama(config)
 
-    batch_task = BatchQueueElement(req, pil_images, config, batch_size)
+    batch_task = BatchQueueElement(req, encoded_images, config, batch_size)
     task_queue.add_task(batch_task)
 
     return await wait_in_queue(batch_task, None)

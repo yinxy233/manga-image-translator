@@ -3,15 +3,21 @@ from __future__ import annotations
 import asyncio
 import base64
 import sys
+import unittest
 from io import BytesIO
 from types import ModuleType, SimpleNamespace
 
-from fastapi import HTTPException
-from fastapi.responses import StreamingResponse
-from fastapi.testclient import TestClient
-from PIL import Image
-from pydantic import BaseModel, ConfigDict
-import pytest
+try:
+    from fastapi import HTTPException
+    from fastapi.responses import StreamingResponse
+    from fastapi.testclient import TestClient
+    from PIL import Image
+    from pydantic import BaseModel, ConfigDict, PrivateAttr
+    import pytest
+except ModuleNotFoundError as error:  # pragma: no cover - minimal development env
+    raise unittest.SkipTest(
+        f"Full public API test dependencies are unavailable: {error.name}"
+    ) from error
 
 
 def install_test_stubs() -> None:
@@ -22,6 +28,8 @@ def install_test_stubs() -> None:
         """Minimal config model for API authentication tests."""
 
         model_config = ConfigDict(extra="allow")
+        _web_frontend_optimized: bool = PrivateAttr(default=False)
+        _image_result_only: bool = PrivateAttr(default=False)
 
     manga_translator_stub.Config = Config
     sys.modules["manga_translator"] = manga_translator_stub
@@ -53,6 +61,7 @@ def install_test_stubs() -> None:
 
         ip: str
         port: int
+        nonce: str | None = None
         busy: bool = False
 
     class DummyExecutors:
@@ -77,12 +86,59 @@ def install_test_stubs() -> None:
     instance_stub.executor_instances = DummyExecutors()
     sys.modules["server.instance"] = instance_stub
 
+    ollama_runtime_stub = ModuleType("server.ollama_runtime")
 
-install_test_stubs()
+    class DummyOllamaRuntime:
+        """In-memory warmup state that never opens a test network connection."""
 
-import server.main as server_main
-import server.request_extraction as request_extraction
-from server.settings import ServerSettings
+        def schedule_warmup(self) -> None:
+            """Leave the deterministic test runtime unconfigured."""
+
+        async def ensure_probed(self) -> bool:
+            """Report that no native local model was configured for API tests."""
+            return False
+
+        def snapshot(self) -> dict[str, object]:
+            """Return the health fields expected by the public endpoint."""
+            return {
+                "status": "unconfigured",
+                "service_started_at_unix": 0.0,
+                "observed_at_unix": 0.0,
+            }
+
+    ollama_runtime_stub.ollama_runtime = DummyOllamaRuntime()
+    sys.modules["server.ollama_runtime"] = ollama_runtime_stub
+
+
+_ISOLATED_MODULE_NAMES = (
+    "manga_translator",
+    "server.instance",
+    "server.main",
+    "server.myqueue",
+    "server.ollama_runtime",
+    "server.request_extraction",
+    "server.sent_data_internal",
+    "server.to_json",
+)
+_ORIGINAL_MODULES = {
+    module_name: sys.modules.get(module_name)
+    for module_name in _ISOLATED_MODULE_NAMES
+}
+try:
+    install_test_stubs()
+    import server.main as server_main
+    import server.myqueue as server_queue
+    import server.request_extraction as request_extraction
+    from server.sent_data_internal import FrameDecoder, process_stream
+    from server.settings import ServerSettings
+finally:
+    # Keep this module's direct references while preventing lightweight stubs
+    # from leaking into later full-suite test collection.
+    for module_name, original_module in _ORIGINAL_MODULES.items():
+        if original_module is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = original_module
 
 
 def create_test_png_bytes() -> bytes:
@@ -128,10 +184,35 @@ def test_public_routes_remain_accessible_without_api_key(monkeypatch) -> None:
     assert health_response.json()["capabilities"] == {
         "web_result_fastpath": True,
         "source_url_translation": True,
+        "ollama_native": True,
+        "performance_diagnostics": True,
     }
+    assert health_response.json()["recommended_client_concurrency"] == 1
     assert queue_response.status_code == 200
     assert translate_response.status_code == 200
     assert translate_response.headers["content-type"] == "image/png"
+
+
+def test_health_only_advertises_benchmark_approved_available_workers(monkeypatch) -> None:
+    """Health concurrency is both opt-in and capped by launched workers."""
+    monkeypatch.setattr(
+        server_main,
+        "server_settings",
+        ServerSettings(
+            public_api_key=None,
+            version=server_main.server_settings.version,
+            recommended_client_concurrency=3,
+        ),
+    )
+    monkeypatch.setattr(
+        server_main.executor_instances,
+        "list",
+        [object(), object()],
+    )
+
+    payload = server_main.build_health_payload()
+
+    assert payload["recommended_client_concurrency"] == 2
 
 
 def test_public_routes_require_valid_api_key_when_configured(monkeypatch) -> None:
@@ -295,15 +376,134 @@ def test_remote_image_fetch_rejects_timeout(monkeypatch) -> None:
     assert exc_info.value.detail == "Remote image request timed out."
 
 
+def test_encoded_image_path_does_not_fully_decode_in_public_process(monkeypatch) -> None:
+    """Validated compressed bytes should remain intact until the worker process."""
+    payload = create_test_png_bytes()
+    monkeypatch.setattr(
+        request_extraction,
+        "_open_image_from_bytes",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("unexpected full decode")),
+    )
+
+    result = asyncio.run(request_extraction.to_image_bytes(payload))
+
+    assert result is payload
+
+
+def test_legacy_local_openai_switches_only_after_ollama_probe(monkeypatch) -> None:
+    """A successful native probe upgrades legacy local Ollama configuration."""
+    async def ready() -> bool:
+        """Return a deterministic successful probe result."""
+        return True
+
+    translator = SimpleNamespace(translator="custom_openai", _translator_gen=object())
+    config = SimpleNamespace(translator=translator)
+    monkeypatch.setattr(request_extraction.ollama_runtime, "ensure_probed", ready)
+
+    asyncio.run(request_extraction._prefer_native_local_ollama(config))
+
+    assert translator.translator == "ollama"
+    assert translator._translator_gen is None
+
+
+def test_native_ollama_waits_for_startup_warmup(monkeypatch) -> None:
+    """The first native generation should not race the model preload request."""
+    probes = 0
+
+    async def ready() -> bool:
+        """Record the synchronization probe used by the native request."""
+        nonlocal probes
+        probes += 1
+        return True
+
+    translator = SimpleNamespace(translator="ollama", _translator_gen=None)
+    config = SimpleNamespace(translator=translator)
+    monkeypatch.setattr(request_extraction.ollama_runtime, "ensure_probed", ready)
+
+    asyncio.run(request_extraction._prefer_native_local_ollama(config))
+
+    assert probes == 1
+    assert translator.translator == "ollama"
+
+
+def test_legacy_openai_is_preserved_when_native_probe_fails(monkeypatch) -> None:
+    """A non-Ollama-compatible server remains on the OpenAI-compatible path."""
+    async def unavailable() -> bool:
+        """Return a deterministic failed probe result."""
+        return False
+
+    translator = SimpleNamespace(translator="custom_openai", _translator_gen=None)
+    config = SimpleNamespace(translator=translator)
+    monkeypatch.setattr(request_extraction.ollama_runtime, "ensure_probed", unavailable)
+
+    asyncio.run(request_extraction._prefer_native_local_ollama(config))
+
+    assert translator.translator == "custom_openai"
+
+
+def test_internal_frame_decoder_handles_one_byte_fragments() -> None:
+    """The bytearray decoder should preserve order across arbitrary fragmentation."""
+    first = bytes([1]) + (3).to_bytes(4, "big") + b"ocr"
+    second = bytes([0]) + (4).to_bytes(4, "big") + b"png!"
+    decoder = FrameDecoder()
+    frames: list[tuple[int, bytes]] = []
+
+    for value in first + second:
+        frames.extend(decoder.feed(bytes([value])))
+
+    assert frames == [(1, b"ocr"), (0, b"png!")]
+    assert decoder.remainder() == b""
+
+
+def test_internal_stream_rejects_a_truncated_terminal_frame() -> None:
+    """A broken worker connection must become an error instead of a hung client."""
+    class FakeContent:
+        """Yield one incomplete result frame."""
+
+        async def iter_any(self):
+            yield b"\x00\x00\x00\x00\x04pn"
+
+    response = SimpleNamespace(content=FakeContent())
+
+    with pytest.raises(RuntimeError, match="truncated frame"):
+        asyncio.run(process_stream(response, lambda _code, _data: None))
+
+
+def test_disconnected_queued_task_is_removed_before_worker_submission(monkeypatch) -> None:
+    """A client that leaves the queue must never reserve or call a model worker."""
+    class DisconnectedTask:
+        """Minimal queue task whose originating request is already gone."""
+
+        async def is_client_disconnected(self) -> bool:
+            """Report a closed connection on every queue poll."""
+            return True
+
+    class RejectingExecutors:
+        """Fail if disconnect cleanup reaches worker capacity checks."""
+
+        def free_executors(self) -> int:
+            """Worker admission must not be queried for a disconnected task."""
+            raise AssertionError("disconnected task reached worker admission")
+
+    task = DisconnectedTask()
+    monkeypatch.setattr(server_queue.task_queue, "queue", [task])
+    monkeypatch.setattr(server_queue, "executor_instances", RejectingExecutors())
+
+    asyncio.run(server_queue.wait_in_queue(task, lambda _code, _data: None))
+
+    assert server_queue.task_queue.queue == []
+
+
 def test_internal_nonce_route_is_not_blocked_by_public_api_key(monkeypatch) -> None:
     """Internal nonce-protected routes should not require the public API key."""
+    registered: list[object] = []
     monkeypatch.setattr(
         server_main,
         "server_settings",
         ServerSettings(public_api_key="public-secret", version=server_main.server_settings.version),
     )
     monkeypatch.setattr(server_main, "nonce", "internal-secret")
-    monkeypatch.setattr(server_main.executor_instances, "register", lambda _instance: None)
+    monkeypatch.setattr(server_main.executor_instances, "register", registered.append)
 
     with TestClient(server_main.app) as client:
         response = client.post(
@@ -313,11 +513,20 @@ def test_internal_nonce_route_is_not_blocked_by_public_api_key(monkeypatch) -> N
         )
 
     assert response.status_code == 200
+    assert registered[0].nonce == "internal-secret"
 
 
 def test_build_internal_instance_ports_returns_incremental_ports() -> None:
     """Internal translator worker ports should increment from the web port."""
     assert server_main.build_internal_instance_ports(8000, 3) == [8001, 8002, 8003]
+
+
+def test_result_folder_path_rejects_parent_traversal() -> None:
+    """Fast-path result downloads must stay inside the result directory."""
+    with pytest.raises(HTTPException) as exc_info:
+        server_main._result_folder_path("..")
+
+    assert exc_info.value.status_code == 404
 
 
 def test_prepare_starts_multiple_instances(monkeypatch) -> None:

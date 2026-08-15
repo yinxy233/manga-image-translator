@@ -17,7 +17,9 @@ class CommonDetector(InfererModule):
 
         # Apply filters
         img_h, img_w = image.shape[:2]
-        orig_image = image.copy()
+        # A full-page copy is only needed when auto-rotation may rerun the
+        # detector with the unfiltered source image.
+        orig_image = image.copy() if auto_rotate else None
         minimum_image_size = 400
         # Automatically add border if image too small (instead of simply resizing due to them more likely containing large fonts)
         add_border = min(img_w, img_h) < minimum_image_size

@@ -1,3 +1,4 @@
+/** Translator identifiers accepted by the local service configuration. */
 export type TranslatorKey =
   | "youdao"
   | "baidu"
@@ -13,6 +14,7 @@ export type TranslatorKey =
   | "groq"
   | "gemini"
   | "gemini_2stage"
+  | "ollama"
   | "custom_openai"
   | "nllb"
   | "nllb_big"
@@ -28,7 +30,8 @@ export type TranslatorKey =
   | "none";
 
 export type UploadTransport = "multipart" | "base64-json";
-export type StreamEndpoint = "standard" | "web-fast";
+/** Browser-to-service streaming policy, including capability negotiation. */
+export type StreamEndpoint = "auto" | "standard" | "web-fast";
 export type DetectorKey = "default" | "dbconvnext" | "ctd" | "craft" | "paddle" | "none";
 export type InpainterKey = "default" | "lama_large" | "lama_mpe" | "sd" | "none" | "original";
 export type RenderDirection = "auto" | "horizontal" | "vertical";
@@ -39,6 +42,7 @@ export interface LauncherPosition {
   y: number;
 }
 
+/** Persisted userscript settings after validation and default merging. */
 export interface UserscriptSettings {
   serverBaseUrl: string;
   apiKey: string;
@@ -57,15 +61,35 @@ export interface UserscriptSettings {
   autoTranslateEnabled: boolean;
   fullPageTranslateEnabled: boolean;
   cacheEnabled: boolean;
+  /** Enables lightweight timings and Long Task records; disabled by default. */
+  performanceDiagnostics: boolean;
   maxConcurrency: number;
   launcherPosition: LauncherPosition | null;
   adapterOverrides: AdapterOverrides;
 }
 
+/** Backwards-compatible local service health and capability response. */
 export interface HealthPayload {
   status: string;
   version: string;
   queue_size: number;
+  total_instances?: number;
+  free_instances?: number;
+  /** Service-side safe queue concurrency for this hardware configuration. */
+  recommended_client_concurrency?: number;
+  /** Optional feature flags used for backwards-compatible endpoint negotiation. */
+  capabilities?: {
+    web_result_fastpath?: boolean;
+    source_url_translation?: boolean;
+    ollama_native?: boolean;
+    performance_diagnostics?: boolean;
+  };
+  /** Native Ollama warmup/probe state, without prompt or response content. */
+  ollama?: {
+    status: string;
+    model?: string;
+    error?: string;
+  };
 }
 
 export type SharedTaskStatus =
@@ -108,9 +132,10 @@ export interface TranslationEvent {
   text: string;
 }
 
+/** One decoded progress or binary-result frame from the local service stream. */
 export interface StreamFrame {
   code: number;
-  data: Uint8Array;
+  data: Uint8Array<ArrayBuffer>;
 }
 
 export interface ConnectionState {

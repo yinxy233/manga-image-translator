@@ -13,6 +13,7 @@ const DEFAULT_MAX_CACHE_ENTRIES = 120;
 
 type IndexedDbFactory = Pick<IDBFactory, "open">;
 
+/** Persisted translated image plus LRU metadata. */
 export interface TranslationCacheRecord {
   key: string;
   blob: Blob;
@@ -21,10 +22,15 @@ export interface TranslationCacheRecord {
   byteSize: number;
 }
 
+/** Minimal storage contract shared by IndexedDB and deterministic tests. */
 export interface TranslationCacheStore {
+  /** Delete one cached result by its stable key. */
   delete(key: string): Promise<void>;
+  /** Read one cached result without throwing on a missing key. */
   get(key: string): Promise<TranslationCacheRecord | null>;
+  /** List records for bounded LRU pruning. */
   list(): Promise<TranslationCacheRecord[]>;
+  /** Insert or replace one cached result. */
   put(record: TranslationCacheRecord): Promise<void>;
 }
 
@@ -164,6 +170,7 @@ class IndexedDbTranslationCacheStore implements TranslationCacheStore {
   }
 }
 
+/** Failure-tolerant IndexedDB cache keyed by image and translation settings. */
 export class TranslationResultCache {
   private readonly digest: DigestFn | null;
 
@@ -185,6 +192,7 @@ export class TranslationResultCache {
       new IndexedDbTranslationCacheStore(indexedDbFactory);
   }
 
+  /** Hash a blob and build its cache key for backwards-compatible callers. */
   async buildKey(
     imageBlob: Blob,
     _sourceUrl: string,
@@ -196,13 +204,19 @@ export class TranslationResultCache {
 
     try {
       const imageHash = await buildImageContentHash(imageBlob, this.digest);
-      return `${imageHash}|${buildConfigSignature(settings)}`;
+      return this.buildKeyFromHash(imageHash, settings);
     } catch (error) {
       console.warn("[mit-userscript] Failed to build the translation cache key.", error);
       return null;
     }
   }
 
+  /** Builds a cache key from the digest already computed during discovery. */
+  buildKeyFromHash(imageHash: string, settings: UserscriptSettings): string {
+    return `${imageHash}|${buildConfigSignature(settings)}`;
+  }
+
+  /** Return and touch a normalized cached PNG, or null on any cache failure. */
   async get(key: string): Promise<Blob | null> {
     if (!this.store) {
       return null;
@@ -220,11 +234,15 @@ export class TranslationResultCache {
         return null;
       }
 
-      await this.store.put({
+      // Serving a hit is latency-sensitive. LRU metadata maintenance is
+      // best-effort and must not turn a readable hit into a network upload.
+      void this.store.put({
         ...record,
         blob: normalizedBlob,
         byteSize: byteLengthOfBlob(normalizedBlob),
         lastAccessedAt: this.now()
+      }).catch((error: unknown) => {
+        console.warn("[mit-userscript] Failed to update cache access metadata.", error);
       });
       return normalizedBlob;
     } catch (error) {
@@ -233,6 +251,7 @@ export class TranslationResultCache {
     }
   }
 
+  /** Remove all cached results without throwing into the translation path. */
   async clear(): Promise<boolean> {
     const store = this.store;
     if (!store) {
@@ -249,6 +268,7 @@ export class TranslationResultCache {
     }
   }
 
+  /** Store a normalized PNG and enforce the configured LRU entry bound. */
   async set(key: string, blob: Blob): Promise<void> {
     if (!this.store) {
       return;

@@ -56,4 +56,53 @@ describe("TaskQueue", () => {
     expect(onCancel).toHaveBeenCalledWith("ignored");
     expect(queue.getStats().ignored).toBe(1);
   });
+
+  it("settles cancellation when running work resolves after abort", async () => {
+    const onCancel = vi.fn();
+    let finish: () => void = () => {
+      throw new Error("The task did not start.");
+    };
+    const queue = new TaskQueue({ maxConcurrency: 1 });
+
+    queue.enqueue({
+      id: "running-task",
+      run: async () => new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+      onCancel
+    });
+    queue.cancel("running-task", "canceled");
+    finish();
+
+    await vi.waitFor(() => {
+      expect(onCancel).toHaveBeenCalledWith("canceled");
+      expect(queue.getStats().running).toBe(0);
+    });
+  });
+
+  it("keeps cancellation terminal when an aborted transport rejects generically", async () => {
+    const onCancel = vi.fn();
+    const onError = vi.fn();
+    let fail: (error: Error) => void = () => {
+      throw new Error("The task did not start.");
+    };
+    const queue = new TaskQueue({ maxConcurrency: 1 });
+
+    queue.enqueue({
+      id: "generic-abort-error",
+      run: async () => new Promise<void>((_resolve, reject) => {
+        fail = reject;
+      }),
+      onCancel,
+      onError
+    });
+    queue.cancel("generic-abort-error", "canceled");
+    fail(new Error("GM request aborted"));
+
+    await vi.waitFor(() => {
+      expect(onCancel).toHaveBeenCalledWith("canceled");
+      expect(onError).not.toHaveBeenCalled();
+      expect(queue.getStats().errors).toBe(0);
+    });
+  });
 });

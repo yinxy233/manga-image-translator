@@ -119,6 +119,16 @@ def parse_arguments() -> Namespace:
                         help='If a translator should be launched automatically')
     parser.add_argument('--instances', default=1, type=positive_int,
                         help='Number of internal translator worker instances to launch (default: 1)')
+    parser.add_argument(
+        '--recommended-client-concurrency',
+        default=None,
+        type=positive_int,
+        choices=(1, 2),
+        help=(
+            'Browser concurrency approved by the single/double worker benchmark '
+            '(default: 1; values above 1 require matching --instances)'
+        ),
+    )
     parser.add_argument('--ignore-errors', action='store_true', help='Skip image on encountered error.')
     parser.add_argument('--nonce', default=os.getenv('MT_WEB_NONCE') or None, type=str, help='Nonce for securing internal web server communication, set to "None" to disable')
     parser.add_argument('--api-key', default=None, type=str, help='Optional API key used to protect public endpoints')

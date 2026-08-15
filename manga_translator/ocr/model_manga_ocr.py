@@ -181,11 +181,14 @@ class ModelMangaOCR(OfflineOCR):
                     else:
                         cv2.imwrite(f'result/ocrs/{ix}.png', cv2.cvtColor(region[i, :, :, :], cv2.COLOR_RGB2BGR))
                 ix += 1
-            image_tensor = (torch.from_numpy(region).float() - 127.5) / 127.5
-            image_tensor = einops.rearrange(image_tensor, 'N H W C -> N C H W')
-            if self.use_gpu:
-                image_tensor = image_tensor.to(self.device)
-            with torch.no_grad():
+            image_tensor = einops.rearrange(torch.from_numpy(region), 'N H W C -> N C H W')
+            target_device = self.device if self.use_gpu else 'cpu'
+            image_tensor = image_tensor.to(
+                target_device,
+                non_blocking=target_device.startswith('cuda'),
+            )
+            image_tensor = image_tensor.float().sub_(127.5).div_(127.5)
+            with torch.inference_mode():
                 ret = self.model.infer_beam_batch(image_tensor, widths, beams_k = 5, max_seq_length = 255)
             for i, (pred_chars_index, prob, fg_pred, bg_pred, fg_ind_pred, bg_ind_pred) in enumerate(ret):
                 if prob < 0.2:

@@ -24,8 +24,10 @@ from .keys import (
 
 class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
     _INVALID_REPEAT_COUNT = 2  # 如果检测到"无效"翻译，最多重复 2 次
-    _MAX_REQUESTS_PER_MINUTE = 40  # 每分钟最大请求次数
-    _TIMEOUT = 40  # 在重试之前等待服务器响应的时间（秒）
+    # Preserve remote OpenAI-compatible service behavior. Native local Ollama
+    # overrides this to -1 after capability probing selects that backend.
+    _MAX_REQUESTS_PER_MINUTE = 40
+    _TIMEOUT = 40  # Seconds before the legacy compatibility request is restarted.
     _RETRY_ATTEMPTS = 3  # 在放弃之前重试错误请求的次数
     _TIMEOUT_RETRY_ATTEMPTS = 3  # 在放弃之前重试超时请求的次数
     _RATELIMIT_RETRY_ATTEMPTS = 3  # 在放弃之前重试速率限制请求的次数
@@ -52,7 +54,9 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         resolved_api_key = api_key or CUSTOM_OPENAI_API_KEY or "ollama"
         resolved_api_base = api_base or CUSTOM_OPENAI_API_BASE
 
-        self.client = openai.AsyncOpenAI(api_key=resolved_api_key) # required, but unused for ollama
+        self.client = openai.AsyncOpenAI(
+            api_key=resolved_api_key,
+        )  # required, but unused for Ollama
         self.client.base_url = resolved_api_base
         self.token_count = 0
         self.token_count_last = 0
@@ -198,6 +202,7 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         return request_kwargs
 
     def _assemble_prompts(self, from_lang: str, to_lang: str, queries: List[str]):
+        """Assemble prompts using the legacy OpenAI-compatible grouping logic."""
         prompt = ''
 
         if self._INCLUDE_TEMPLATE:
@@ -210,16 +215,13 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         for i, query in enumerate(queries):
             prompt += f'\n<|{i + 1 - i_offset}|>{query}'
 
-            # If prompt is growing too large and there's still a lot of text left
-            # split off the rest of the queries into new prompts.
-            # 1 token = ~4 characters according to https://platform.openai.com/tokenizer
-            # TODO: potentially add summarizations from special requests as context information
+            # Preserve the existing remote-provider request shape. Native
+            # Ollama overrides this method with context-aware linear batching.
             if self._MAX_TOKENS * 2 and len(''.join(queries[i + 1:])) > self._MAX_TOKENS:
                 if self._RETURN_PROMPT:
                     prompt += '\n<|1|>'
                 yield prompt.lstrip(), i + 1 - i_offset
                 prompt = self.prompt_template.format(to_lang=to_lang)
-                # Restart counting at 1
                 i_offset = i + 1
 
         if self._RETURN_PROMPT:
@@ -254,41 +256,7 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
         for prompt, query_size in self._assemble_prompts(from_lang, to_lang, queries):
             self.logger.debug('-- GPT Prompt --\n' + self._format_prompt_log(to_lang, prompt))
 
-            ratelimit_attempt = 0
-            server_error_attempt = 0
-            timeout_attempt = 0
-            while True:
-                request_task = asyncio.create_task(self._request_translation(to_lang, prompt))
-                started = time.time()
-                while not request_task.done():
-                    await asyncio.sleep(0.1)
-                    if time.time() - started > self._TIMEOUT + (timeout_attempt * self._TIMEOUT / 2):
-                        # Server takes too long to respond
-                        if timeout_attempt >= self._TIMEOUT_RETRY_ATTEMPTS:
-                            raise Exception('ollama servers did not respond quickly enough.')
-                        timeout_attempt += 1
-                        self.logger.warning(f'Restarting request due to timeout. Attempt: {timeout_attempt}')
-                        request_task.cancel()
-                        request_task = asyncio.create_task(self._request_translation(to_lang, prompt))
-                        started = time.time()
-                try:
-                    response = await request_task
-                    break
-                except openai.RateLimitError:  # Server returned ratelimit response
-                    ratelimit_attempt += 1
-                    if ratelimit_attempt >= self._RATELIMIT_RETRY_ATTEMPTS:
-                        raise
-                    self.logger.warning(
-                        f'Restarting request due to ratelimiting by Ollama servers. Attempt: {ratelimit_attempt}')
-                    await asyncio.sleep(2)
-                except openai.APIError:  # Server returned 500 error (probably server load)
-                    server_error_attempt += 1
-                    if server_error_attempt >= self._RETRY_ATTEMPTS:
-                        self.logger.error(
-                            'Ollama encountered a server error, possibly due to high server load. Use a different translator or try again later.')
-                        raise
-                    self.logger.warning(f'Restarting request due to a server error. Attempt: {server_error_attempt}')
-                    await asyncio.sleep(1)
+            response = await self._request_translation_with_retries(to_lang, prompt)
 
             # self.logger.debug('-- GPT Response --\n' + response)
             
@@ -349,6 +317,56 @@ class CustomOpenAiTranslator(ConfigGPT, CommonTranslator):
             self.logger.info(f'Used {self.token_count_last} tokens (Total: {self.token_count})')
 
         return translations
+
+    async def _request_translation_with_retries(self, to_lang: str, prompt: str) -> str:
+        """Preserve the legacy remote OpenAI-compatible retry policy."""
+        ratelimit_attempt = 0
+        server_error_attempt = 0
+        timeout_attempt = 0
+        while True:
+            request_task = asyncio.create_task(self._request_translation(to_lang, prompt))
+            started = time.time()
+            while not request_task.done():
+                await asyncio.sleep(0.1)
+                if time.time() - started > self._TIMEOUT + (
+                    timeout_attempt * self._TIMEOUT / 2
+                ):
+                    if timeout_attempt >= self._TIMEOUT_RETRY_ATTEMPTS:
+                        raise Exception('ollama servers did not respond quickly enough.')
+                    timeout_attempt += 1
+                    self.logger.warning(
+                        'Restarting request due to timeout. Attempt: '
+                        f'{timeout_attempt}'
+                    )
+                    request_task.cancel()
+                    request_task = asyncio.create_task(
+                        self._request_translation(to_lang, prompt)
+                    )
+                    started = time.time()
+            try:
+                return await request_task
+            except openai.RateLimitError:
+                ratelimit_attempt += 1
+                if ratelimit_attempt >= self._RATELIMIT_RETRY_ATTEMPTS:
+                    raise
+                self.logger.warning(
+                    'Restarting request due to ratelimiting by Ollama servers. '
+                    f'Attempt: {ratelimit_attempt}'
+                )
+                await asyncio.sleep(2)
+            except openai.APIError:
+                server_error_attempt += 1
+                if server_error_attempt >= self._RETRY_ATTEMPTS:
+                    self.logger.error(
+                        'Ollama encountered a server error, possibly due to high '
+                        'server load. Use a different translator or try again later.'
+                    )
+                    raise
+                self.logger.warning(
+                    'Restarting request due to a server error. '
+                    f'Attempt: {server_error_attempt}'
+                )
+                await asyncio.sleep(1)
 
     async def _request_translation(self, to_lang: str, prompt: str) -> str:
         messages = [{'role': 'system', 'content': self.chat_system_template.format(to_lang=to_lang)}]

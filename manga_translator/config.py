@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Optional, Any, Literal, List
 
 from omegaconf import OmegaConf
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 # TODO: Refactor
@@ -122,6 +122,7 @@ class Translator(str, Enum):
     groq = "groq"
     gemini = "gemini"
     gemini_2stage = "gemini_2stage"
+    ollama = "ollama"
     custom_openai = "custom_openai"
     offline = "offline"
     nllb = "nllb"
@@ -318,6 +319,8 @@ class OcrConfig(BaseModel):
 
 class Config(BaseModel):
     # General
+    performance_diagnostics: bool = False
+    """Collect lightweight structured stage timing without saving intermediate images."""
     filter_text: Optional[str] = None
     """Filter regions by their text with a regex. Example usage: '.*badtext.*'"""
     render: RenderConfig = RenderConfig()
@@ -342,6 +345,10 @@ class Config(BaseModel):
     mask_dilation_offset: int = 20
     """By how much to extend the text mask to remove left-over text pixels of the original image."""
     _filter_text = None
+    # These transport hints survive worker pickling but cannot be supplied by
+    # untrusted JSON configuration payloads.
+    _web_frontend_optimized: bool = PrivateAttr(default=False)
+    _image_result_only: bool = PrivateAttr(default=False)
 
     @property
     def re_filter_text(self):

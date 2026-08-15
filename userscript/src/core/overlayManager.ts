@@ -32,6 +32,7 @@ interface OverlayManagerState {
   connection: ConnectionState;
 }
 
+/** User actions surfaced by the overlay to the translation controller. */
 export interface OverlayManagerCallbacks {
   onTranslateNow: () => void;
   onLauncherPositionChange: (position: LauncherPosition) => void;
@@ -1326,6 +1327,7 @@ const ITEM_STYLE_TEXT = `
   }
 `;
 
+/** Owns the isolated userscript controls and per-image status overlays. */
 export class OverlayManager {
   readonly shadowRoot: ShadowRoot;
 
@@ -1400,6 +1402,8 @@ export class OverlayManager {
   private readonly fullPageCheckbox: HTMLInputElement;
 
   private readonly cacheCheckbox: HTMLInputElement;
+
+  private readonly performanceDiagnosticsCheckbox: HTMLInputElement;
 
   private readonly concurrencyInput: HTMLInputElement;
 
@@ -1502,6 +1506,7 @@ export class OverlayManager {
     this.autoCheckbox = document.createElement("input");
     this.fullPageCheckbox = document.createElement("input");
     this.cacheCheckbox = document.createElement("input");
+    this.performanceDiagnosticsCheckbox = document.createElement("input");
     this.concurrencyInput = document.createElement("input");
     this.adapterList = document.createElement("div");
 
@@ -1560,6 +1565,7 @@ export class OverlayManager {
     this.autoCheckbox.checked = settings.autoTranslateEnabled;
     this.fullPageCheckbox.checked = settings.fullPageTranslateEnabled;
     this.cacheCheckbox.checked = settings.cacheEnabled;
+    this.performanceDiagnosticsCheckbox.checked = settings.performanceDiagnostics;
     this.concurrencyInput.value = String(settings.maxConcurrency);
     this.launcherPosition = settings.launcherPosition;
     this.syncLauncherPosition();
@@ -1927,6 +1933,7 @@ export class OverlayManager {
     this.autoCheckbox.type = "checkbox";
     this.fullPageCheckbox.type = "checkbox";
     this.cacheCheckbox.type = "checkbox";
+    this.performanceDiagnosticsCheckbox.type = "checkbox";
     this.boxThresholdInput.type = "number";
     this.boxThresholdInput.min = String(MIN_BOX_THRESHOLD);
     this.boxThresholdInput.max = String(MAX_BOX_THRESHOLD);
@@ -1987,6 +1994,12 @@ export class OverlayManager {
         true
       ),
       this.createSwitchField("启用缓存", this.cacheCheckbox, "重复图片优先读取本地结果", true),
+      this.createSwitchField(
+        "性能诊断",
+        this.performanceDiagnosticsCheckbox,
+        "仅记录结构化耗时和浏览器长任务，不保存中间图片",
+        true
+      ),
       this.createField("并发上限", this.concurrencyInput)
     );
 
@@ -2056,6 +2069,7 @@ export class OverlayManager {
       autoTranslateEnabled: this.autoCheckbox.checked,
       fullPageTranslateEnabled: this.fullPageCheckbox.checked,
       cacheEnabled: this.cacheCheckbox.checked,
+      performanceDiagnostics: this.performanceDiagnosticsCheckbox.checked,
       maxConcurrency: Number(this.concurrencyInput.value),
       launcherPosition: this.launcherPosition,
       adapterOverrides: Object.fromEntries(

@@ -14,6 +14,7 @@ import type {
 } from "../types";
 import { extractImageBlobFromElement, getManagedImageSourceUrl } from "../utils/image";
 import { buildImageContentHash, buildImageContentSignature } from "../utils/signature";
+import { BrowserPerformanceDiagnostics } from "../utils/performance";
 import { HttpStatusError, TransportClient } from "../utils/transport";
 import { type DiscoveredImageCandidate, ImageDiscovery } from "./imageDiscovery";
 import {
@@ -28,6 +29,8 @@ import { type CancelReason, TaskQueue } from "./taskQueue";
 
 interface SharedImageTask {
   signature: string;
+  imageHash: string;
+  diagnosticTaskId: string;
   sourceUrl: string;
   sourceImage: HTMLImageElement | null;
   sourceBlob: Blob | null;
@@ -39,6 +42,7 @@ interface SharedImageTask {
   queuePosition: string | null;
   activeTask: boolean;
   servedFromCache: boolean;
+  resultByteSize: number;
 }
 
 interface SourceBlobRequest {
@@ -53,6 +57,7 @@ interface PreparedDiscoveredImage {
   generation: number;
   image: HTMLImageElement;
   imageHash: string;
+  diagnosticTaskId: string;
   sourceBlob: Blob;
   sourceUrl: string;
 }
@@ -86,7 +91,9 @@ function createQueueStats(): QueueStats {
 }
 
 function isRenderableEvent(event: TranslationEvent): boolean {
-  return !event.text.startsWith("rendering_folder:") && !event.text.startsWith("final_ready:");
+  return !event.text.startsWith("rendering_folder:")
+    && !event.text.startsWith("final_ready:")
+    && !event.text.startsWith("diagnostics:");
 }
 
 function deriveProgressMessage(event: TranslationEvent): string {
@@ -113,6 +120,7 @@ function deriveFileName(sourceUrl: string): string {
   return "manga-page.png";
 }
 
+/** Coordinates discovery, bounded preparation, translation, caching, and page replacement. */
 export class TranslatorController {
   private readonly transport: TransportClient;
 
@@ -123,6 +131,8 @@ export class TranslatorController {
   private readonly overlay: OverlayManager;
 
   private readonly queue: TaskQueue;
+
+  private readonly diagnostics: BrowserPerformanceDiagnostics;
 
   private settings = loadSettings();
 
@@ -142,9 +152,20 @@ export class TranslatorController {
 
   private discoverySequence = 0;
 
+  private diagnosticSequence = 0;
+
   private nextDiscoveryFlushSequence = 1;
 
   private readonly pendingPreparedImages = new Map<number, PreparedDiscoveredImage | null>();
+
+  private readonly pendingDiscoveryCandidates: Array<{
+    sequence: number;
+    candidate: DiscoveredImageCandidate;
+  }> = [];
+
+  private discoveryPreparationActive = false;
+
+  private preparedTaskQueued = 0;
 
   private discoveryRuns = new WeakMap<HTMLImageElement, number>();
 
@@ -165,10 +186,11 @@ export class TranslatorController {
   constructor() {
     this.transport = new TransportClient();
     this.resultCache = new TranslationResultCache();
+    this.diagnostics = new BrowserPerformanceDiagnostics(this.settings.performanceDiagnostics);
     this.refreshAdapterState();
 
     this.queue = new TaskQueue({
-      maxConcurrency: this.settings.maxConcurrency,
+      maxConcurrency: 1,
       paused: !this.enabled,
       onStatsChange: (stats) => {
         this.queueStats = stats;
@@ -198,6 +220,10 @@ export class TranslatorController {
 
     if (this.enabled) {
       this.scheduleInitialAutoTranslateScan();
+    }
+
+    if (this.settings.streamEndpoint === "auto" || this.settings.maxConcurrency > 1) {
+      void this.negotiateServiceCapacity();
     }
 
     this.renderChrome();
@@ -310,21 +336,53 @@ export class TranslatorController {
     }
 
     const sequence = ++this.discoverySequence;
-    void this.prepareDiscoveredImage(candidate)
+    this.pendingDiscoveryCandidates.push({ sequence, candidate });
+    this.drainDiscoveryPreparations();
+  }
+
+  private drainDiscoveryPreparations(): void {
+    if (
+      this.discoveryPreparationActive ||
+      this.preparedTaskQueued >= 1 ||
+      !this.enabled ||
+      !this.discoveryReady
+    ) {
+      return;
+    }
+
+    const pending = this.pendingDiscoveryCandidates.shift();
+    if (!pending) {
+      return;
+    }
+
+    this.discoveryPreparationActive = true;
+    const diagnosticTaskId = `mit-discovery-${pending.sequence}`;
+    this.diagnostics.begin(diagnosticTaskId, 0);
+    this.diagnostics.mark(diagnosticTaskId, "source_fetch_start");
+    void this.prepareDiscoveredImage(pending.candidate, diagnosticTaskId)
       .then((preparedImage) => {
-        this.commitPreparedDiscovery(sequence, preparedImage);
+        if (!preparedImage) {
+          this.diagnostics.finish(diagnosticTaskId, "canceled");
+        }
+        this.commitPreparedDiscovery(pending.sequence, preparedImage);
       })
       .catch((error: unknown) => {
         const message = this.humanizeError(error);
         this.connection = createConnectionState(message, "error");
         this.renderChrome();
         this.overlay.toast(message, "error");
-        this.commitPreparedDiscovery(sequence, null);
+        this.diagnostics.finish(diagnosticTaskId, "error");
+        this.commitPreparedDiscovery(pending.sequence, null);
+      })
+      .finally(() => {
+        this.discoveryPreparationActive = false;
+        this.drainDiscoveryPreparations();
       });
   }
 
   private async prepareDiscoveredImage(
-    candidate: DiscoveredImageCandidate
+    candidate: DiscoveredImageCandidate,
+    diagnosticTaskId = `mit-direct-discovery-${this.discoverySequence + 1}`
   ): Promise<PreparedDiscoveredImage | null> {
     const { image, sourceUrl } = candidate;
     const discoveryRun = this.nextDiscoveryRun(image);
@@ -344,6 +402,8 @@ export class TranslatorController {
     }
 
     const sourceBlob = await this.resolveSourceBlob({ sourceUrl, sourceImage: image, sourceBlob: null });
+    this.diagnostics.setSourceBytes(diagnosticTaskId, sourceBlob.size);
+    this.diagnostics.mark(diagnosticTaskId, "source_ready");
 
     if (
       generation !== this.generation ||
@@ -361,6 +421,7 @@ export class TranslatorController {
     }
 
     const imageHash = await buildImageContentHash(sourceBlob);
+    this.diagnostics.mark(diagnosticTaskId, "hash_ready");
     if (
       generation !== this.generation ||
       this.discoveryRuns.get(image) !== discoveryRun ||
@@ -377,6 +438,7 @@ export class TranslatorController {
       generation,
       image,
       imageHash,
+      diagnosticTaskId,
       sourceBlob,
       sourceUrl
     };
@@ -413,6 +475,7 @@ export class TranslatorController {
       generation,
       image,
       imageHash,
+      diagnosticTaskId,
       sourceBlob,
       sourceUrl
     } = preparedImage;
@@ -424,11 +487,13 @@ export class TranslatorController {
       !this.discoveryReady ||
       !image.isConnected
     ) {
+      this.diagnostics.finish(diagnosticTaskId, "canceled");
       return;
     }
 
     const currentSourceUrl = this.resolveCurrentSourceUrl({ adapterId, image, sourceUrl });
     if (currentSourceUrl !== sourceUrl) {
+      this.diagnostics.finish(diagnosticTaskId, "canceled");
       return;
     }
 
@@ -439,6 +504,7 @@ export class TranslatorController {
       if (existingEntry?.shared.signature === signature) {
         existingEntry.sourceUrl = sourceUrl;
         refreshImagePresentationState(existingEntry.image, existingEntry.presentation, sourceUrl);
+        this.diagnostics.finish(diagnosticTaskId, "cache");
         return;
       }
       if (existingEntry) {
@@ -456,6 +522,8 @@ export class TranslatorController {
     if (!shared) {
       shared = {
         signature,
+        imageHash,
+        diagnosticTaskId,
         sourceUrl,
         sourceImage: image,
         sourceBlob,
@@ -466,10 +534,13 @@ export class TranslatorController {
         message: "等待加入队列",
         queuePosition: null,
         activeTask: false,
-        servedFromCache: false
+        servedFromCache: false,
+        resultByteSize: 0
       };
       this.sharedTasks.set(signature, shared);
       this.enqueueSharedTask(shared);
+    } else if (diagnosticTaskId !== shared.diagnosticTaskId) {
+      this.diagnostics.finish(diagnosticTaskId, "cache");
     }
 
     if (!shared.sourceImage || !shared.sourceImage.isConnected) {
@@ -518,6 +589,8 @@ export class TranslatorController {
     shared.servedFromCache = false;
 
     const generation = this.generation;
+    let awaitingStart = true;
+    this.preparedTaskQueued += 1;
     this.queue.enqueue({
       id: shared.taskId,
       onQueued: () => {
@@ -529,11 +602,17 @@ export class TranslatorController {
         this.renderImages();
       },
       onStart: () => {
+        if (awaitingStart) {
+          awaitingStart = false;
+          this.preparedTaskQueued = Math.max(0, this.preparedTaskQueued - 1);
+          this.drainDiscoveryPreparations();
+        }
         if (generation !== this.generation) {
           return;
         }
         shared.status = "processing";
         shared.message = "读取原图";
+        this.diagnostics.mark(shared.diagnosticTaskId, "queue_started");
         this.renderImages();
       },
       run: async (signal) => {
@@ -546,9 +625,10 @@ export class TranslatorController {
         if (this.settings.cacheEnabled) {
           shared.status = "processing";
           shared.message = "检查本地缓存";
+          this.diagnostics.mark(shared.diagnosticTaskId, "cache_lookup");
           this.renderImages();
 
-          cacheKey = await this.resultCache.buildKey(sourceBlob, shared.sourceUrl, this.settings);
+          cacheKey = this.resultCache.buildKeyFromHash(shared.imageHash, this.settings);
           if (cacheKey) {
             const cachedResult = await this.resultCache.get(cacheKey);
             if (generation !== this.generation) {
@@ -560,6 +640,7 @@ export class TranslatorController {
                 URL.revokeObjectURL(shared.resultUrl);
               }
               shared.servedFromCache = true;
+              shared.resultByteSize = cachedResult.size;
               shared.resultUrl = URL.createObjectURL(cachedResult);
               shared.message = "命中本地缓存";
               this.renderImages();
@@ -570,6 +651,8 @@ export class TranslatorController {
 
         shared.status = "processing";
         shared.message = "上传到翻译服务";
+        this.diagnostics.setUploadBytes(shared.diagnosticTaskId, sourceBlob.size);
+        this.diagnostics.mark(shared.diagnosticTaskId, "upload_start");
         this.renderImages();
 
         const result = await this.transport.translateImage({
@@ -585,8 +668,13 @@ export class TranslatorController {
         }
 
         if (cacheKey) {
-          await this.resultCache.set(cacheKey, result);
+          // IndexedDB bookkeeping must not delay replacement with a result
+          // that has already completed translation and download.
+          void this.resultCache.set(cacheKey, result);
         }
+
+        shared.resultByteSize = result.size;
+        this.diagnostics.mark(shared.diagnosticTaskId, "result_received");
 
         if (shared.resultUrl) {
           URL.revokeObjectURL(shared.resultUrl);
@@ -597,6 +685,10 @@ export class TranslatorController {
         if (generation !== this.generation) {
           return;
         }
+        // Successful pages retain only the displayed result URL. Keeping every
+        // compressed source Blob would make long reader sessions grow linearly;
+        // failed/canceled tasks still retain theirs for an explicit retry.
+        shared.sourceBlob = null;
         shared.activeTask = false;
         shared.status = "complete";
         shared.message = shared.servedFromCache ? "已从缓存加载" : "翻译完成";
@@ -607,6 +699,12 @@ export class TranslatorController {
         );
         this.renderChrome();
         this.renderImages();
+        this.diagnostics.mark(shared.diagnosticTaskId, "page_replaced");
+        this.diagnostics.finish(
+          shared.diagnosticTaskId,
+          shared.servedFromCache ? "cache" : "complete",
+          shared.resultByteSize
+        );
       },
       onError: (error) => {
         if (generation !== this.generation) {
@@ -620,8 +718,14 @@ export class TranslatorController {
         this.renderChrome();
         this.renderImages();
         this.overlay.toast(shared.message, "error");
+        this.diagnostics.finish(shared.diagnosticTaskId, "error");
       },
       onCancel: (reason) => {
+        if (awaitingStart) {
+          awaitingStart = false;
+          this.preparedTaskQueued = Math.max(0, this.preparedTaskQueued - 1);
+          this.drainDiscoveryPreparations();
+        }
         if (generation !== this.generation) {
           return;
         }
@@ -630,6 +734,7 @@ export class TranslatorController {
         shared.message = reason === "ignored" ? "已忽略未完成任务" : "已取消未完成任务";
         shared.queuePosition = null;
         this.renderImages();
+        this.diagnostics.finish(shared.diagnosticTaskId, "canceled");
       }
     });
   }
@@ -639,12 +744,22 @@ export class TranslatorController {
       return shared.sourceBlob;
     }
 
+    let networkError: unknown = null;
+    try {
+      return await this.transport.fetchImageBlob(shared.sourceUrl, signal);
+    } catch (error) {
+      if (signal?.aborted) {
+        throw error;
+      }
+      networkError = error;
+    }
+
     if (shared.sourceImage?.isConnected) {
       const currentSource = shared.sourceImage.currentSrc || shared.sourceImage.src || "";
       const managedSource = getManagedImageSourceUrl(shared.sourceImage);
       if (!currentSource.startsWith("blob:") || managedSource !== shared.sourceUrl) {
-        // 对已显示在页面上的图片优先复用浏览器内存中的像素，避免某些图床对脚本二次拉图返回 403。
-        // 如果当前 blob: 是脚本已套用的译图，必须回退到原始 URL，避免把旧译图当成原图继续翻译。
+        // Canvas is intentionally the last fallback: a 704×26000 RGBA canvas
+        // consumes roughly 70 MiB and PNG re-encoding blocks the main thread.
         const sourceBlob = await extractImageBlobFromElement(shared.sourceImage);
         if (sourceBlob) {
           return sourceBlob;
@@ -652,7 +767,9 @@ export class TranslatorController {
       }
     }
 
-    return this.transport.fetchImageBlob(shared.sourceUrl, signal);
+    throw networkError instanceof Error
+      ? networkError
+      : new Error("无法读取原始图片。请检查图床跨域权限。");
   }
 
   private handleTranslationEvent(
@@ -660,7 +777,27 @@ export class TranslatorController {
     generation: number,
     event: TranslationEvent
   ): void {
-    if (generation !== this.generation || !isRenderableEvent(event)) {
+    if (generation !== this.generation) {
+      return;
+    }
+
+    if (event.code === 1 && event.text.startsWith("diagnostics:")) {
+      try {
+        const diagnostics = JSON.parse(event.text.slice("diagnostics:".length)) as Record<
+          string,
+          unknown
+        >;
+        this.diagnostics.setServerDiagnostics(shared.diagnosticTaskId, diagnostics);
+      } catch {
+        // Malformed optional diagnostics never block a completed translation.
+      }
+      return;
+    }
+
+    if (event.code === 1) {
+      this.diagnostics.mark(shared.diagnosticTaskId, `server:${event.text || "progress"}`);
+    }
+    if (!isRenderableEvent(event)) {
       return;
     }
 
@@ -689,12 +826,14 @@ export class TranslatorController {
 
   private applySettings(nextSettings: UserscriptSettings): void {
     this.settings = saveSettings(nextSettings);
+    this.diagnostics.setEnabled(this.settings.performanceDiagnostics);
     this.refreshAdapterState();
     this.overlay.updateSettings(this.settings);
     this.overlay.updateAdapterStates(this.adapterStates);
     this.resetRuntimeState();
     this.rebuildDiscovery();
-    this.queue.setMaxConcurrency(this.settings.maxConcurrency);
+    // Raise above one only after the service explicitly recommends it.
+    this.queue.setMaxConcurrency(1);
     this.enabled = this.settings.autoTranslateEnabled;
     this.clearInitialAutoTranslateScan();
     if (this.enabled) {
@@ -702,6 +841,9 @@ export class TranslatorController {
       this.queue.resume();
       this.discovery?.reset();
       this.discovery?.rescan();
+      if (this.settings.streamEndpoint === "auto" || this.settings.maxConcurrency > 1) {
+        void this.negotiateServiceCapacity();
+      }
     } else {
       this.discoveryReady = false;
       this.queue.pause();
@@ -724,7 +866,10 @@ export class TranslatorController {
     this.clearInitialAutoTranslateScan();
     this.generation += 1;
     this.queue.reset("canceled");
+    this.diagnostics.reset();
     this.pendingPreparedImages.clear();
+    this.pendingDiscoveryCandidates.length = 0;
+    this.preparedTaskQueued = 0;
     this.nextDiscoveryFlushSequence = this.discoverySequence + 1;
     for (const entry of this.imageEntries.values()) {
       releaseImagePresentation(entry.image, entry.presentation);
@@ -746,14 +891,14 @@ export class TranslatorController {
     this.discoveryReady = false;
     this.clearInitialAutoTranslateScan();
 
-    if (document.readyState === "complete") {
+    if (document.readyState !== "loading") {
       this.startInitialAutoTranslateTimer();
       return;
     }
 
     this.waitingForInitialAutoScanLoad = true;
-    window.addEventListener(
-      "load",
+    document.addEventListener(
+      "DOMContentLoaded",
       this.handleInitialAutoScanLoad,
       { once: true }
     );
@@ -778,7 +923,7 @@ export class TranslatorController {
 
   private clearInitialAutoTranslateScan(): void {
     if (this.waitingForInitialAutoScanLoad) {
-      window.removeEventListener("load", this.handleInitialAutoScanLoad);
+      document.removeEventListener("DOMContentLoaded", this.handleInitialAutoScanLoad);
       this.waitingForInitialAutoScanLoad = false;
     }
 
@@ -869,6 +1014,12 @@ export class TranslatorController {
     }
 
     if (!entry.shared.activeTask) {
+      entry.shared.diagnosticTaskId = `mit-retry-${++this.diagnosticSequence}`;
+      this.diagnostics.begin(
+        entry.shared.diagnosticTaskId,
+        entry.shared.sourceBlob?.size ?? 0
+      );
+      this.diagnostics.mark(entry.shared.diagnosticTaskId, "retry_reuse_source");
       this.enqueueSharedTask(entry.shared);
     }
 
@@ -890,18 +1041,37 @@ export class TranslatorController {
   private async testConnection(): Promise<void> {
     try {
       const health = await this.transport.checkHealth(this.settings);
+      this.applyServiceCapacity(health);
       this.connection = createConnectionState(
         `连接成功 · v${health.version} · 队列 ${health.queue_size}`,
         "success"
       );
       this.renderChrome();
-      this.overlay.toast("连接成功，远程服务可用。");
+      this.overlay.toast("连接成功，本地翻译服务可用。");
     } catch (error) {
       const message = this.humanizeError(error);
       this.connection = createConnectionState(message, "error");
       this.renderChrome();
       this.overlay.toast(message, "error");
     }
+  }
+
+  private async negotiateServiceCapacity(): Promise<void> {
+    try {
+      const health = await this.transport.checkHealth(this.settings);
+      this.applyServiceCapacity(health);
+    } catch {
+      // Translation retains the standard endpoint fallback and surfaces errors
+      // at the task boundary; a background capability probe is best-effort.
+    }
+  }
+
+  private applyServiceCapacity(health: { recommended_client_concurrency?: number }): void {
+    const recommended = Number(health.recommended_client_concurrency);
+    if (!Number.isFinite(recommended) || recommended < 1) {
+      return;
+    }
+    this.queue.setMaxConcurrency(Math.min(this.settings.maxConcurrency, Math.floor(recommended)));
   }
 
   private humanizeError(error: unknown): string {

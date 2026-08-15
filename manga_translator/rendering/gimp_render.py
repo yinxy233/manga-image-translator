@@ -5,6 +5,7 @@ import cv2
 import platform
 import glob
 import os
+import numpy as np
 
 from ..utils import Context
 
@@ -67,13 +68,28 @@ script_template = """
 )"""
 
 
+def _ensure_gimp_mask(ctx: Context) -> np.ndarray | None:
+    """Create the four-channel inpainting layer only for layered exports."""
+    if ctx.gimp_mask is not None:
+        return ctx.gimp_mask
+    if not ctx.text_regions or ctx.img_inpainted is None or ctx.mask is None:
+        return None
+    ctx.gimp_mask = np.dstack(
+        (cv2.cvtColor(ctx.img_inpainted, cv2.COLOR_RGB2BGR), ctx.mask)
+    )
+    return ctx.gimp_mask
+
+
 def gimp_render(out_file, ctx: Context):
+    """Render an editable XCF, PSD, or PDF through GIMP."""
     input_file = os.path.join(tempfile.gettempdir(), ".gimp_input.png")
     mask_file = os.path.join(tempfile.gettempdir(), ".gimp_mask.png")
 
     extension = out_file.split(".")[-1]
 
     ctx.upscaled.save(input_file)
+
+    _ensure_gimp_mask(ctx)
 
     # If there is no text on the page, gimp_mask will be None and there is no
     # need to add it as a layer.

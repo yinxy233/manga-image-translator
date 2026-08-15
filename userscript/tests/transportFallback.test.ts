@@ -5,6 +5,7 @@ import { TransportClient } from "../src/utils/transport";
 
 const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+g5XsAAAAASUVORK5CYII=";
 const PNG_BYTES = Uint8Array.from(Buffer.from(PNG_BASE64, "base64"));
+const STANDARD_SETTINGS = { ...DEFAULT_SETTINGS, streamEndpoint: "standard" as const };
 
 function createPngBlob(type = "image/png"): Blob {
   return new Blob([PNG_BYTES], { type });
@@ -100,7 +101,7 @@ describe("TransportClient", () => {
     const result = await transport.translateImage({
       imageBlob: new Blob(["test"], { type: "image/png" }),
       fileName: "page.png",
-      settings: DEFAULT_SETTINGS,
+      settings: STANDARD_SETTINGS,
       onEvent: vi.fn()
     });
 
@@ -108,26 +109,81 @@ describe("TransportClient", () => {
     expect(gmRequest).toHaveBeenCalledTimes(1);
   });
 
-  it("falls back to GM blob mode when GM stream is unavailable", async () => {
+  it("does not resubmit after the service has accepted a translation", async () => {
+    const encoder = new TextEncoder();
+    let emittedProgress = false;
+    const acceptedThenBroken = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (!emittedProgress) {
+          emittedProgress = true;
+          controller.enqueue(createFrame(1, encoder.encode("detection")));
+          return;
+        }
+        controller.error(new Error("connection closed"));
+      }
+    });
+    const fetchImpl = vi.fn(async () => new Response(acceptedThenBroken, { status: 200 }));
+    const gmRequest = vi.fn();
+    const transport = new TransportClient({
+      fetchImpl,
+      gmRequest: gmRequest as unknown as (details: GMRequestDetails<unknown>) => GMRequestHandle
+    });
+
+    await expect(transport.translateImage({
+      imageBlob: new Blob(["test"], { type: "image/png" }),
+      fileName: "page.png",
+      settings: STANDARD_SETTINGS,
+      onEvent: vi.fn()
+    })).rejects.toThrow("connection closed");
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(gmRequest).not.toHaveBeenCalled();
+  });
+
+  it("parses the same accepted fetch response when streaming is unavailable", async () => {
+    const terminalFrame = createFrame(0, PNG_BYTES);
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      body: null,
+      arrayBuffer: async () => terminalFrame.buffer
+    }) as Response);
+    const gmRequest = vi.fn();
+    const transport = new TransportClient({
+      fetchImpl,
+      gmRequest: gmRequest as unknown as (details: GMRequestDetails<unknown>) => GMRequestHandle
+    });
+
+    const result = await transport.translateImage({
+      imageBlob: new Blob(["test"], { type: "image/png" }),
+      fileName: "page.png",
+      settings: STANDARD_SETTINGS,
+      onEvent: vi.fn()
+    });
+
+    expect(result.type).toBe("image/png");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(gmRequest).not.toHaveBeenCalled();
+  });
+
+  it("parses one buffered GM request when streaming is unavailable", async () => {
     const fetchImpl = vi.fn(async () => {
       throw new TypeError("Failed to fetch");
     });
 
     const onEvent = vi.fn();
     const gmRequest = vi.fn(
-      ((details: GMRequestDetails<ReadableStream<Uint8Array> | Blob>) => {
+      ((details: GMRequestDetails<ReadableStream<Uint8Array> | ArrayBuffer>) => {
         queueMicrotask(() => {
-          if (details.responseType === "stream") {
-            details.onloadstart?.({
-              status: 200,
-              response: new Blob(["not-a-stream"], { type: "application/octet-stream" })
-            });
-            return;
-          }
-
+          const bufferedFrame = createFrame(0, PNG_BYTES);
+          const bufferedFrames = bufferedFrame.buffer as ArrayBuffer;
+          details.onloadstart?.({
+            status: 200,
+            response: bufferedFrames
+          });
           details.onload?.({
             status: 200,
-            response: createPngBlob("application/octet-stream")
+            response: bufferedFrames
           });
         });
 
@@ -141,20 +197,15 @@ describe("TransportClient", () => {
     const result = await transport.translateImage({
       imageBlob: new Blob(["test"], { type: "image/png" }),
       fileName: "page.png",
-      settings: DEFAULT_SETTINGS,
+      settings: STANDARD_SETTINGS,
       onEvent
     });
 
     expect(result).toBeInstanceOf(Blob);
     expect(result.type).toBe("image/png");
-    expect(onEvent).toHaveBeenCalledWith({
-      code: 1,
-      payload: new Uint8Array(),
-      text: "兼容模式：等待完整结果"
-    });
-    expect(gmRequest).toHaveBeenCalledTimes(2);
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(gmRequest).toHaveBeenCalledTimes(1);
     expect(gmRequest.mock.calls[0]?.[0]?.responseType).toBe("stream");
-    expect(gmRequest.mock.calls[1]?.[0]?.responseType).toBe("blob");
   });
 
   it("uses base64 JSON transport when configured", async () => {
@@ -168,6 +219,7 @@ describe("TransportClient", () => {
 
     const settings = {
       ...DEFAULT_SETTINGS,
+      streamEndpoint: "standard" as const,
       uploadTransport: "base64-json" as const,
       detector: "ctd" as const,
       detectionSize: 1664,
@@ -233,7 +285,7 @@ describe("TransportClient", () => {
     expect(gmRequest).not.toHaveBeenCalled();
   });
 
-  it("uses the standard multipart stream endpoint by default", async () => {
+  it("uses the explicitly selected standard multipart stream endpoint", async () => {
     const fetchImpl = vi.fn(async () => new Response(createStreamResponse(), { status: 200 }));
     const transport = new TransportClient({
       fetchImpl,
@@ -243,7 +295,7 @@ describe("TransportClient", () => {
     const result = await transport.translateImage({
       imageBlob: new Blob(["test-image"], { type: "image/png" }),
       fileName: "page.png",
-      settings: DEFAULT_SETTINGS,
+      settings: STANDARD_SETTINGS,
       onEvent: vi.fn()
     });
 
@@ -298,6 +350,38 @@ describe("TransportClient", () => {
       text: "final_ready:folder 1"
     });
     expect(gmRequest).not.toHaveBeenCalled();
+  });
+
+  it("returns the final image without waiting for the progress stream to close", async () => {
+    const encoder = new TextEncoder();
+    const neverClosedStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(createFrame(1, encoder.encode("final_ready:ready-now")));
+      }
+    });
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("/result/")) {
+        return new Response(PNG_BYTES, {
+          status: 200,
+          headers: { "Content-Type": "image/png" }
+        });
+      }
+      return new Response(neverClosedStream, { status: 200 });
+    });
+    const transport = new TransportClient({
+      fetchImpl,
+      gmRequest: vi.fn() as unknown as (details: GMRequestDetails<unknown>) => GMRequestHandle
+    });
+
+    const result = await transport.translateImage({
+      imageBlob: new Blob(["test-image"], { type: "image/png" }),
+      fileName: "page.png",
+      settings: { ...DEFAULT_SETTINGS, streamEndpoint: "web-fast" },
+      onEvent: vi.fn()
+    });
+
+    expect(result.size).toBe(PNG_BYTES.length);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
   it("uses the web fast-path JSON endpoint when configured", async () => {
@@ -357,7 +441,7 @@ describe("TransportClient", () => {
     await transport.translateImage({
       imageBlob: new Blob(["test-image"], { type: "image/png" }),
       fileName: "page.png",
-      settings: DEFAULT_SETTINGS,
+      settings: STANDARD_SETTINGS,
       onEvent: vi.fn()
     });
 
@@ -374,5 +458,41 @@ describe("TransportClient", () => {
     expect(payloadText.startsWith(`--${boundary}\r\n`)).toBe(true);
     expect(payloadText).toContain('name="image"');
     expect(payloadText).toContain('name="config"');
+  });
+
+  it("automatically negotiates the web fast path from health capabilities", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/health")) {
+        return new Response(
+          JSON.stringify({
+            status: "ok",
+            version: "test",
+            queue_size: 0,
+            capabilities: { web_result_fastpath: true }
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.includes("/result/")) {
+        return new Response(PNG_BYTES, { status: 200, headers: { "Content-Type": "image/png" } });
+      }
+      return new Response(createFastPathStreamResponse("auto-folder"), { status: 200 });
+    });
+    const transport = new TransportClient({
+      fetchImpl,
+      gmRequest: vi.fn() as unknown as (details: GMRequestDetails<unknown>) => GMRequestHandle
+    });
+
+    await transport.translateImage({
+      imageBlob: new Blob(["test-image"], { type: "image/png" }),
+      fileName: "page.png",
+      settings: DEFAULT_SETTINGS,
+      onEvent: vi.fn()
+    });
+
+    const requestUrls = fetchImpl.mock.calls.map((call) => String(call[0]));
+    expect(requestUrls[0]).toContain("/health");
+    expect(requestUrls[1]).toContain("/translate/with-form/image/stream/web");
   });
 });

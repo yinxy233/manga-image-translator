@@ -36,6 +36,7 @@ function writeRawValue(value: string): void {
   window.localStorage.setItem(SETTINGS_KEY, value);
 }
 
+/** Merge persisted settings with defaults and clamp every user-controlled value. */
 export function sanitizeSettings(settings: Partial<UserscriptSettings>): UserscriptSettings {
   const maxConcurrency = Number.isFinite(settings.maxConcurrency)
     ? Math.min(6, Math.max(1, Number(settings.maxConcurrency)))
@@ -46,7 +47,9 @@ export function sanitizeSettings(settings: Partial<UserscriptSettings>): Userscr
       ? settings.uploadTransport
       : DEFAULT_SETTINGS.uploadTransport;
   const streamEndpoint =
-    settings.streamEndpoint === "standard" || settings.streamEndpoint === "web-fast"
+    settings.streamEndpoint === "auto" ||
+    settings.streamEndpoint === "standard" ||
+    settings.streamEndpoint === "web-fast"
       ? settings.streamEndpoint
       : DEFAULT_SETTINGS.streamEndpoint;
   const launcherPosition = sanitizeLauncherPosition(settings.launcherPosition);
@@ -115,12 +118,16 @@ export function sanitizeSettings(settings: Partial<UserscriptSettings>): Userscr
       settings.fullPageTranslateEnabled ?? DEFAULT_SETTINGS.fullPageTranslateEnabled
     ),
     cacheEnabled: Boolean(settings.cacheEnabled ?? DEFAULT_SETTINGS.cacheEnabled),
+    performanceDiagnostics: Boolean(
+      settings.performanceDiagnostics ?? DEFAULT_SETTINGS.performanceDiagnostics
+    ),
     maxConcurrency,
     launcherPosition,
     adapterOverrides
   };
 }
 
+/** Load persisted settings, falling back safely when storage is unavailable. */
 export function loadSettings(): UserscriptSettings {
   try {
     const raw = readRawValue();
@@ -134,6 +141,7 @@ export function loadSettings(): UserscriptSettings {
   }
 }
 
+/** Normalize and persist settings, returning the exact runtime representation. */
 export function saveSettings(settings: UserscriptSettings): UserscriptSettings {
   const normalized = sanitizeSettings(settings);
   writeRawValue(JSON.stringify(normalized));

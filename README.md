@@ -464,6 +464,7 @@ shared              run in API mode
 --start-instance      Whether an instance of the translator should be started automatically
 --nonce NONCE         Nonce used to secure internal Web Server communication, set to "None" to disable
 --instances INSTANCES Number of internal translator worker instances to launch (default: 1)
+--recommended-client-concurrency N Browser concurrency approved by the one/two-worker benchmark (default: 1)
 --api-key API_KEY     Optional API key for protecting public translation endpoints
 --models-ttl MODELS_TTL  Time in seconds to keep models in memory after last use (0 means forever)
 ```
@@ -779,6 +780,7 @@ An example config file can be found in example/config-example.json
         "deepseek",
         "groq",
         "custom_openai",
+        "ollama",
         "offline",
         "nllb",
         "nllb_big",
@@ -900,6 +902,12 @@ An example config file can be found in example/config-example.json
     }
   },
   "properties": {
+    "performance_diagnostics": {
+      "default": false,
+      "description": "Collect lightweight structured stage timing without saving intermediate images.",
+      "title": "Performance Diagnostics",
+      "type": "boolean"
+    },
     "filter_text": {
       "anyOf": [
         {
@@ -1131,6 +1139,7 @@ FIL: Filipino (Tagalog)
 | papago | | | |
 | sakura | | | Requires `SAKURA_API_BASE` |
 | custom_openai | | | Requires `CUSTOM_OPENAI_API_BASE` `CUSTOM_OPENAI_MODEL` |
+| ollama | | ✔️ | Native local `/api/chat`; configure `OLLAMA_MODEL` |
 | offline | | ✔️ | Use the most suitable offline translator for the language|
 | nllb | | ✔️ | Offline translation model |
 | nllb_big | | ✔️ | Larger NLLB model |
@@ -1204,6 +1213,11 @@ This can achieve further optimization of the translation effect and make it poss
 | `CUSTOM_OPENAI_API_BASE`               | Custom OpenAI API Base URL                                | `http://localhost:11434/v1`        | Use OLLAMA_HOST environment variable to change bind IP and port                                            |
 | `CUSTOM_OPENAI_MODEL`                  | Custom OpenAI compatible model name                                               | `''`                               | Example: `qwen2.5:7b`, ensure you pull and run it before usage                                             |
 | `CUSTOM_OPENAI_MODEL_CONF`             | Custom OpenAI compatible model configuration                                              | `''`                               | Example: `qwen2`                                                                                          |
+| `OLLAMA_API_BASE`                      | Native Ollama API base URL                                                        | `http://localhost:11434`           | Falls back to `CUSTOM_OPENAI_API_BASE` with a trailing `/v1` removed                                      |
+| `OLLAMA_MODEL`                         | Native Ollama model name                                                           | `CUSTOM_OPENAI_MODEL`              | Reuses the existing local-model setting when unset                                                        |
+| `OLLAMA_KEEP_ALIVE`                    | How long Ollama keeps the model loaded                                              | `5m`                               | Passed to `/api/chat` and the startup warmup request                                                       |
+| `OLLAMA_CONTEXT_LENGTH`                | Ollama context window used for region batching                                      | `8192`                             | Batches only between complete text regions                                                                |
+| `OLLAMA_DISABLE_REASONING`             | Disable model thinking when supported                                               | `false`                            | Also honors `CUSTOM_OPENAI_DISABLE_REASONING` when unset                                                   |
 
 **Instructions for use:**
 
@@ -1472,6 +1486,10 @@ Limitations:
 -   The font family is controlled separately by the `--gimp-font` parameter.
 
 ## Future Plans
+
+For local Ollama deployments, full-chain performance measurement and the AOT
+narrow-image regression matrix are documented in
+[docs/local-performance-benchmark.md](docs/local-performance-benchmark.md).
 
 Here are some things that need to be done to improve this project in the future. Contributions are welcome!
 

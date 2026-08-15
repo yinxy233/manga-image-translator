@@ -35,7 +35,8 @@ export const processingStatuses = [
   "rendering",
 ];
 
-export type TranslatorKey =  
+/** Translator identifiers accepted by the web configuration form. */
+export type TranslatorKey =
   | "youdao"  
   | "baidu"  
   | "deepl"  
@@ -47,6 +48,7 @@ export type TranslatorKey =
   | "deepseek"  
   | "groq"  
   | "gemini"  
+  | "ollama"
   | "custom_openai"  
   | "nllb"  
   | "nllb_big"  
@@ -60,7 +62,8 @@ export type TranslatorKey =
   | "qwen2_big"  
   | "none";  
 
-export const validTranslators: TranslatorKey[] = [  
+/** Translator identifiers permitted by the web configuration validator. */
+export const validTranslators: TranslatorKey[] = [
   "youdao",  
   "baidu",  
   "deepl",  
@@ -72,6 +75,7 @@ export const validTranslators: TranslatorKey[] = [
   "deepseek",  
   "groq",  
   "gemini",  
+  "ollama",
   "custom_openai",  
   "nllb",  
   "nllb_big",  

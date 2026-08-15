@@ -115,6 +115,10 @@ class CommonTranslator(InfererModule):
     # Will sleep for the rest of the minute if the request count is over this number.
     _MAX_REQUESTS_PER_MINUTE = -1
 
+    # Opt in when the backend can preserve one-to-one region identity across
+    # retries. Legacy translators keep their historical full-page retry shape.
+    _RETRY_FAILED_QUERIES_ONLY = False
+
     def __init__(self):
         super().__init__()
         self.mtpe_adapter = MTPEAdapter()
@@ -167,10 +171,14 @@ class CommonTranslator(InfererModule):
                 final_translations.append(None)
                 query_indices.append(i)
 
-        queries = [queries[i] for i in query_indices]
+        source_queries = [queries[i] for i in query_indices]
+        working_queries = list(source_queries)
 
-        translations = [''] * len(queries)
-        untranslated_indices = list(range(len(queries)))
+        if not source_queries:
+            return final_translations
+
+        translations = [''] * len(source_queries)
+        untranslated_indices = list(range(len(source_queries)))
         for i in range(1 + self._INVALID_REPEAT_COUNT): # Repeat until all translations are considered valid
             if i > 0:
                 self.logger.warn(f'Repeating because of invalid translation. Attempt: {i+1}')
@@ -180,46 +188,67 @@ class CommonTranslator(InfererModule):
             await self._ratelimit_sleep()
 
             # Translate
-            _translations = await self._translate(*self.parse_language_codes(from_lang, to_lang, fatal=True), queries)
+            request_indices = (
+                untranslated_indices
+                if self._RETRY_FAILED_QUERIES_ONLY
+                else list(range(len(working_queries)))
+            )
+            retry_queries = [working_queries[index] for index in request_indices]
+            _translations = await self._translate(
+                *self.parse_language_codes(from_lang, to_lang, fatal=True),
+                retry_queries,
+            )
 
-            # Extend returned translations list to have the same size as queries
-            if len(_translations) < len(queries):
-                _translations.extend([''] * (len(queries) - len(_translations)))
-            elif len(_translations) > len(queries):
-                _translations = _translations[:len(queries)]
+            # Normalize the exact request shape used by this backend.
+            if len(_translations) < len(request_indices):
+                _translations.extend([''] * (len(request_indices) - len(_translations)))
+            elif len(_translations) > len(request_indices):
+                _translations = _translations[:len(request_indices)]
 
-            # Only overwrite yet untranslated indices
-            for j in untranslated_indices:
-                translations[j] = _translations[j]
+            untranslated_set = set(untranslated_indices)
+            for local_index, query_index in enumerate(request_indices):
+                if query_index in untranslated_set:
+                    translations[query_index] = _translations[local_index]
 
             if self._INVALID_REPEAT_COUNT == 0:
                 break
 
             new_untranslated_indices = []
             for j in untranslated_indices:
-                q, t = queries[j], translations[j]
+                q, t = working_queries[j], translations[j]
                 # Repeat invalid translations with slightly modified queries
                 if self._is_translation_invalid(q, t):
                     new_untranslated_indices.append(j)
-                    queries[j] = self._modify_invalid_translation_query(q, t)
+                    working_queries[j] = self._modify_invalid_translation_query(q, t)
             untranslated_indices = new_untranslated_indices
 
             if not untranslated_indices:
                 break
 
-        translations = [self._clean_translation_output(q, r, to_lang) for q, r in zip(queries, translations)]
+        postprocess_queries = (
+            source_queries
+            if self._RETRY_FAILED_QUERIES_ONLY
+            else working_queries
+        )
+        translations = [
+            self._clean_translation_output(q, r, to_lang)
+            for q, r in zip(postprocess_queries, translations)
+        ]
 
         if to_lang == 'ARA':
             import arabic_reshaper , bidi.algorithm
             translations = [bidi.algorithm.get_display(arabic_reshaper.reshape(t)) for t in translations]
 
         if use_mtpe:
-            translations = await self.mtpe_adapter.dispatch(queries, translations)
+            translations = await self.mtpe_adapter.dispatch(
+                postprocess_queries,
+                translations,
+            )
 
         # Merge with the queries without text
         for i, trans in enumerate(translations):
             final_translations[query_indices[i]] = trans
-            self.logger.info(f'{i}: {queries[i]} => {trans}')
+            self.logger.info(f'{i}: {postprocess_queries[i]} => {trans}')
 
         return final_translations
 

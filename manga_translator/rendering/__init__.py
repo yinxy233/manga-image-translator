@@ -20,6 +20,64 @@ from ..utils import (
 
 logger = get_logger('render')
 
+
+def _warp_rgba_to_local_roi(
+    rgba_box: np.ndarray,
+    homography: np.ndarray,
+    destination_points: np.ndarray,
+    canvas_shape: tuple[int, ...],
+) -> tuple[np.ndarray | None, tuple[int, int, int, int]]:
+    """Warp a rendered text box only across its clipped destination ROI.
+
+    Args:
+        rgba_box: Source text pixels with an alpha channel.
+        homography: Source-to-full-canvas perspective matrix.
+        destination_points: Four destination quadrilateral points.
+        canvas_shape: Shape of the final image used for boundary clipping.
+
+    Returns:
+        The local RGBA image and ``(x0, y0, x1, y1)`` bounds. An empty
+        intersection returns ``(None, (0, 0, 0, 0))``.
+    """
+    points = np.asarray(destination_points, dtype=np.float32).reshape(-1, 2)
+    x, y, width, height = cv2.boundingRect(points.astype(np.int32))
+    x0 = max(0, x)
+    y0 = max(0, y)
+    x1 = min(int(canvas_shape[1]), x + width)
+    y1 = min(int(canvas_shape[0]), y + height)
+    if x0 >= x1 or y0 >= y1:
+        return None, (0, 0, 0, 0)
+
+    # Linear perspective interpolation can touch one pixel beyond the polygon
+    # bounds. Warp a halo for equivalent edge samples, then crop it back to the
+    # exact legacy bounding rectangle before alpha compositing.
+    interpolation_halo = 2
+    warp_x0 = max(0, x0 - interpolation_halo)
+    warp_y0 = max(0, y0 - interpolation_halo)
+    warp_x1 = min(int(canvas_shape[1]), x1 + interpolation_halo)
+    warp_y1 = min(int(canvas_shape[0]), y1 + interpolation_halo)
+
+    translate_to_roi = np.array(
+        [[1.0, 0.0, -warp_x0], [0.0, 1.0, -warp_y0], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+    local_homography = translate_to_roi @ homography
+    rgba_region = cv2.warpPerspective(
+        rgba_box,
+        local_homography,
+        (warp_x1 - warp_x0, warp_y1 - warp_y0),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    local_x0 = x0 - warp_x0
+    local_y0 = y0 - warp_y0
+    rgba_region = rgba_region[
+        local_y0:local_y0 + (y1 - y0),
+        local_x0:local_x0 + (x1 - x0),
+    ]
+    return rgba_region, (x0, y0, x1, y1)
+
 def parse_font_paths(path: str, default: List[str] = None) -> List[str]:
     if path:
         parsed = path.split(',')
@@ -269,6 +327,8 @@ def render(
     line_spacing,
     disable_font_border
 ):
+    """Render and perspective-warp one translated region into a local ROI."""
+    dst_points = np.asarray(dst_points).reshape(4, 2)
     fg, bg = region.get_font_colors()
     fg, bg = fg_bg_compare(fg, bg)
 
@@ -402,11 +462,22 @@ def render(
     #src_pts[:, 1] = np.clip(np.round(src_pts[:, 1]), 0, enlarged_h * 2)
 
     M, _ = cv2.findHomography(src_points, dst_points, cv2.RANSAC, 5.0)
-    rgba_region = cv2.warpPerspective(box, M, (img.shape[1], img.shape[0]), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-    x, y, w, h = cv2.boundingRect(dst_points.astype(np.int32))
-    canvas_region = rgba_region[y:y+h, x:x+w, :3]
-    mask_region = rgba_region[y:y+h, x:x+w, 3:4].astype(np.float32) / 255.0
-    img[y:y+h, x:x+w] = np.clip((img[y:y+h, x:x+w].astype(np.float32) * (1 - mask_region) + canvas_region.astype(np.float32) * mask_region), 0, 255).astype(np.uint8)
+    if M is None:
+        return img
+    rgba_region, (x0, y0, x1, y1) = _warp_rgba_to_local_roi(
+        box, M, dst_points, img.shape
+    )
+    if rgba_region is None:
+        return img
+    canvas_region = rgba_region[:, :, :3]
+    mask_region = rgba_region[:, :, 3:4].astype(np.float32) / 255.0
+    destination = img[y0:y1, x0:x1]
+    img[y0:y1, x0:x1] = np.clip(
+        destination.astype(np.float32) * (1 - mask_region)
+        + canvas_region.astype(np.float32) * mask_region,
+        0,
+        255,
+    ).astype(np.uint8)
     return img
 
 async def dispatch_eng_render(img_canvas: np.ndarray, original_img: np.ndarray, text_regions: List[TextBlock], font_path: str = '', line_spacing: int = 0, disable_font_border: bool = False) -> np.ndarray:

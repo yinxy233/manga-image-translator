@@ -34,7 +34,7 @@ export const App: React.FC = () => {
   const [detectionResolution, setDetectionResolution] = useState("1536");
   const [textDetector, setTextDetector] = useState("default");
   const [renderTextDirection, setRenderTextDirection] = useState("auto");
-  const [translator, setTranslator] = useState<TranslatorKey>("youdao");
+  const [translator, setTranslator] = useState<TranslatorKey>("ollama");
   const [targetLanguage, setTargetLanguage] = useState("CHS");
 
   const [inpaintingSize, setInpaintingSize] = useState("2048");
