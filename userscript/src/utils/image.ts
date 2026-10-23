@@ -1,4 +1,10 @@
 const MANAGED_IMAGE_SOURCE_ATTRIBUTE = "data-mit-managed-source-url";
+const LAZY_SOURCE_ATTRIBUTES = [
+  "data-original",
+  "data-src",
+  "data-lazy-src",
+  "data-url"
+] as const;
 
 function isBlobUrl(imageUrl: string): boolean {
   return imageUrl.startsWith("blob:");
@@ -21,13 +27,37 @@ export function clearManagedImageSourceUrl(image: HTMLImageElement): void {
   image.removeAttribute(MANAGED_IMAGE_SOURCE_ATTRIBUTE);
 }
 
+/** Resolve the latest declared original source without mistaking a managed result Blob for it. */
 export function resolveDefaultImageSource(image: HTMLImageElement): string | null {
-  const currentSource = image.currentSrc || image.src || null;
+  const declaredSrc = image.getAttribute("src")?.trim();
+  const currentSource = image.currentSrc || (declaredSrc ? image.src : null);
   const managedSource = getManagedImageSourceUrl(image);
   if (managedSource && currentSource && isBlobUrl(currentSource)) {
     return managedSource;
   }
+
+  for (const attributeName of LAZY_SOURCE_ATTRIBUTES) {
+    const declaredSource = image.getAttribute(attributeName)?.trim();
+    if (declaredSource) {
+      return declaredSource;
+    }
+  }
   return currentSource;
+}
+
+/** Return whether the pixels currently rendered by an image belong to a source URL. */
+export function isImageDisplayingSource(image: HTMLImageElement, sourceUrl: string): boolean {
+  const displayedSource = image.currentSrc || image.src;
+  if (!displayedSource) {
+    return false;
+  }
+
+  try {
+    return new URL(displayedSource, window.location.href).href ===
+      new URL(sourceUrl, window.location.href).href;
+  } catch {
+    return displayedSource === sourceUrl;
+  }
 }
 
 function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob | null> {

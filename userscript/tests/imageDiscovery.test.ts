@@ -82,11 +82,11 @@ describe("ImageDiscovery", () => {
     FakeIntersectionObserver.instance?.trigger(smallImage);
 
     expect(eligible).toHaveBeenCalledTimes(1);
-    expect(eligible).toHaveBeenCalledWith({
+    expect(eligible).toHaveBeenCalledWith(expect.objectContaining({
       image: largeImage,
       sourceUrl: "https://example.com/page-1.jpg",
       adapterId: "reader"
-    });
+    }));
     discovery.stop();
   });
 
@@ -121,11 +121,11 @@ describe("ImageDiscovery", () => {
     FakeIntersectionObserver.instance?.trigger(image);
 
     expect(eligible).toHaveBeenCalledTimes(1);
-    expect(eligible).toHaveBeenCalledWith({
+    expect(eligible).toHaveBeenCalledWith(expect.objectContaining({
       image,
       sourceUrl: "https://example.com/page-1.jpg",
       adapterId: "reader"
-    });
+    }));
     discovery.stop();
   });
 
@@ -190,11 +190,11 @@ describe("ImageDiscovery", () => {
     discovery.start();
 
     expect(eligible).toHaveBeenCalledTimes(1);
-    expect(eligible).toHaveBeenCalledWith({
+    expect(eligible).toHaveBeenCalledWith(expect.objectContaining({
       image,
       sourceUrl: "https://example.com/page-3.jpg",
       adapterId: "reader"
-    });
+    }));
     expect(FakeIntersectionObserver.instance?.observe).not.toHaveBeenCalled();
     discovery.stop();
   });
@@ -245,11 +245,11 @@ describe("ImageDiscovery", () => {
     FakeIntersectionObserver.instance?.trigger(bannerImage);
 
     expect(eligible).toHaveBeenCalledTimes(1);
-    expect(eligible).toHaveBeenCalledWith({
+    expect(eligible).toHaveBeenCalledWith(expect.objectContaining({
       image: chapterImage,
       sourceUrl: "https://zek6.mrawx.cyou/manga/example/01.webp",
       adapterId: "manhwaRaw"
-    });
+    }));
     discovery.stop();
   });
 
@@ -278,11 +278,197 @@ describe("ImageDiscovery", () => {
     FakeIntersectionObserver.instance?.trigger(bannerImage);
 
     expect(eligible).toHaveBeenCalledTimes(1);
-    expect(eligible).toHaveBeenCalledWith({
+    expect(eligible).toHaveBeenCalledWith(expect.objectContaining({
       image: chapterImage,
       sourceUrl: "https://img.manga18.club/wireless/059/001.webp",
       adapterId: "manga18"
+    }));
+    discovery.stop();
+  });
+
+  it("reports a lazy image immediately and advances it after the real load", () => {
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+    const eligible = vi.fn();
+    const image = document.createElement("img");
+    let complete = false;
+    let naturalWidth = 0;
+    let naturalHeight = 0;
+    image.src = "/loading.gif";
+    image.setAttribute("data-src", "https://example.com/chapter-1.webp");
+    Object.defineProperty(image, "complete", { configurable: true, get: () => complete });
+    Object.defineProperty(image, "naturalWidth", { configurable: true, get: () => naturalWidth });
+    Object.defineProperty(image, "naturalHeight", { configurable: true, get: () => naturalHeight });
+    Object.defineProperty(image, "currentSrc", { configurable: true, get: () => image.src });
+    image.getBoundingClientRect = () => ({
+      top: 20,
+      bottom: 740,
+      width: 480,
+      height: 720
+    }) as DOMRect;
+    document.body.append(image);
+
+    const discovery = new ImageDiscovery({
+      adapters: [createAdapter({ id: "reader", label: "Reader" })],
+      onImageEligible: eligible
     });
+    const report = discovery.start();
+
+    expect(report).toMatchObject({ candidates: 1, added: 1, waitingForLoad: 1 });
+    expect(eligible).toHaveBeenLastCalledWith(expect.objectContaining({
+      sourceUrl: "https://example.com/chapter-1.webp",
+      readyForPreparation: false,
+      priority: 0
+    }));
+
+    complete = true;
+    naturalWidth = 1200;
+    naturalHeight = 1800;
+    image.src = "https://example.com/chapter-1.webp";
+    image.dispatchEvent(new Event("load"));
+
+    expect(eligible).toHaveBeenCalledTimes(2);
+    expect(eligible).toHaveBeenLastCalledWith(expect.objectContaining({
+      readyForPreparation: true
+    }));
+    discovery.stop();
+  });
+
+  it("emits the latest source revision after a lazy attribute changes", async () => {
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+    const eligible = vi.fn();
+    const image = createLoadedImage("https://example.com/first.webp");
+    image.setAttribute("data-src", "https://example.com/first.webp");
+    image.getBoundingClientRect = () => ({
+      top: 10,
+      bottom: 730,
+      width: 480,
+      height: 720
+    }) as DOMRect;
+    document.body.append(image);
+
+    const discovery = new ImageDiscovery({
+      adapters: [createAdapter({ id: "reader", label: "Reader" })],
+      onImageEligible: eligible
+    });
+    discovery.start();
+    image.setAttribute("data-src", "https://example.com/second.webp");
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+    expect(eligible).toHaveBeenLastCalledWith(expect.objectContaining({
+      sourceUrl: "https://example.com/second.webp"
+    }));
+    discovery.stop();
+  });
+
+  it("tracks picture source updates and reports removal", async () => {
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+    const eligible = vi.fn();
+    const removed = vi.fn();
+    const picture = document.createElement("picture");
+    const source = document.createElement("source");
+    source.srcset = "https://example.com/first.webp";
+    const image = createLoadedImage("https://example.com/first.webp");
+    Object.defineProperty(image, "currentSrc", {
+      configurable: true,
+      get: () => source.srcset
+    });
+    image.getBoundingClientRect = () => ({
+      top: 10,
+      bottom: 730,
+      width: 480,
+      height: 720
+    }) as DOMRect;
+    picture.append(source, image);
+    document.body.append(picture);
+
+    const discovery = new ImageDiscovery({
+      adapters: [createAdapter({ id: "reader", label: "Reader" })],
+      onImageEligible: eligible,
+      onImageRemoved: removed
+    });
+    discovery.start();
+    source.srcset = "https://example.com/second.webp";
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+    expect(eligible).toHaveBeenLastCalledWith(expect.objectContaining({
+      sourceUrl: "https://example.com/second.webp"
+    }));
+    picture.remove();
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(removed).toHaveBeenCalledWith(image);
+    discovery.stop();
+  });
+
+  it("invalidates an active task as soon as its source becomes unavailable", async () => {
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+    const eligible = vi.fn();
+    const removed = vi.fn();
+    const image = createLoadedImage("https://example.com/first.webp");
+    image.setAttribute("data-page-source", "https://example.com/first.webp");
+    document.body.append(image);
+    const discovery = new ImageDiscovery({
+      adapters: [createAdapter({
+        id: "reader",
+        label: "Reader",
+        isImageCandidate: (candidate) => Boolean(candidate.getAttribute("data-page-source")),
+        resolveImageSource: (candidate) => candidate.getAttribute("data-page-source")
+      })],
+      eagerScanEnabled: true,
+      onImageEligible: eligible,
+      onImageRemoved: removed
+    });
+    discovery.start();
+
+    image.removeAttribute("data-page-source");
+    image.setAttribute("src", "");
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+    expect(eligible).toHaveBeenCalledTimes(1);
+    expect(removed).toHaveBeenCalledOnce();
+    expect(removed).toHaveBeenCalledWith(image);
+    discovery.stop();
+  });
+
+  it("returns idempotent scan counts for an already reported source", () => {
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+    const image = createLoadedImage("https://example.com/page.webp");
+    document.body.append(image);
+    const discovery = new ImageDiscovery({
+      adapters: [createAdapter({ id: "reader", label: "Reader" })],
+      eagerScanEnabled: true,
+      onImageEligible: vi.fn()
+    });
+
+    const firstReport = discovery.start();
+    const repeatedReport = discovery.rescan();
+
+    expect(firstReport).toMatchObject({ inspected: 1, candidates: 1, added: 1 });
+    expect(repeatedReport).toMatchObject({ inspected: 1, candidates: 1, added: 0 });
+    discovery.stop();
+  });
+
+  it("prepares adapter-wide indexes once per scan instead of once per image", () => {
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+    const prepareScan = vi.fn();
+    document.body.append(
+      createLoadedImage("https://example.com/1.webp"),
+      createLoadedImage("https://example.com/2.webp"),
+      createLoadedImage("https://example.com/3.webp")
+    );
+    const discovery = new ImageDiscovery({
+      adapters: [createAdapter({
+        id: "reader",
+        label: "Reader",
+        prepareScan
+      })],
+      eagerScanEnabled: true,
+      onImageEligible: vi.fn()
+    });
+
+    discovery.start();
+    expect(prepareScan).toHaveBeenCalledTimes(1);
+    discovery.rescan();
+    expect(prepareScan).toHaveBeenCalledTimes(2);
     discovery.stop();
   });
 });
@@ -292,7 +478,7 @@ function createLoadedImage(sourceUrl: string): HTMLImageElement {
   Object.defineProperty(image, "complete", { value: true });
   Object.defineProperty(image, "naturalWidth", { value: 1200 });
   Object.defineProperty(image, "naturalHeight", { value: 1800 });
-  Object.defineProperty(image, "currentSrc", { value: sourceUrl });
+  Object.defineProperty(image, "currentSrc", { configurable: true, value: sourceUrl });
   image.getBoundingClientRect = () =>
     ({
       width: 480,

@@ -5,26 +5,61 @@ import {
   MIN_RENDER_HEIGHT,
   MIN_RENDER_WIDTH
 } from "../config";
-import { isRasterImageUrl } from "../utils/image";
+import type { ImageScanReport } from "../types";
+import { isImageDisplayingSource, isRasterImageUrl } from "../utils/image";
 
+const OBSERVED_IMAGE_ATTRIBUTES = [
+  "src",
+  "srcset",
+  "sizes",
+  "data-src",
+  "data-original",
+  "data-lazy-src",
+  "data-url"
+] as const;
+
+const OBSERVED_SOURCE_ATTRIBUTES = ["srcset", "sizes", "media", "type"] as const;
+
+/** One adapter-resolved image revision reported to the controller. */
 export interface DiscoveredImageCandidate {
   image: HTMLImageElement;
   sourceUrl: string;
   adapterId: string;
+  readyForPreparation: boolean;
+  priority: 0 | 1 | 2;
 }
 
+/** Configuration for continuously observing ordinary image and picture elements. */
 export interface ImageDiscoveryOptions {
   adapters: ReadonlyArray<SiteAdapterDefinition>;
   onImageEligible: (candidate: DiscoveredImageCandidate) => void;
+  onImageRemoved?: (image: HTMLImageElement) => void;
   eagerScanEnabled?: boolean;
 }
 
-export function isEligibleRasterImage(image: HTMLImageElement, sourceUrl: string): boolean {
-  if (!isRasterImageUrl(sourceUrl)) {
-    return false;
-  }
+interface ProcessResult {
+  candidate: boolean;
+  added: boolean;
+  waitingForLoad: boolean;
+}
 
-  if (!image.isConnected) {
+interface ProcessedSourceState {
+  key: string;
+  ready: boolean;
+  priority: 0 | 1 | 2;
+}
+
+function createEmptyScanReport(): ImageScanReport {
+  return {
+    inspected: 0,
+    candidates: 0,
+    added: 0,
+    waitingForLoad: 0
+  };
+}
+
+function isVisibleCandidate(image: HTMLImageElement, sourceUrl: string): boolean {
+  if (!isRasterImageUrl(sourceUrl) || !image.isConnected) {
     return false;
   }
 
@@ -39,33 +74,63 @@ export function isEligibleRasterImage(image: HTMLImageElement, sourceUrl: string
     return false;
   }
 
-  const smallRenderedImage =
+  return !(
     Math.max(rect.width, rect.height) < MIN_RENDER_WIDTH &&
-    Math.min(rect.width, rect.height) < MIN_RENDER_HEIGHT;
+    Math.min(rect.width, rect.height) < MIN_RENDER_HEIGHT
+  );
+}
 
-  const smallNaturalImage =
-    Math.max(image.naturalWidth, image.naturalHeight) < MIN_NATURAL_WIDTH &&
-    Math.min(image.naturalWidth, image.naturalHeight) < MIN_NATURAL_HEIGHT;
-
-  if (smallRenderedImage || smallNaturalImage) {
+/** Return whether a loaded image is large enough for manga translation. */
+export function isEligibleRasterImage(image: HTMLImageElement, sourceUrl: string): boolean {
+  if (!isVisibleCandidate(image, sourceUrl)) {
     return false;
   }
 
-  return true;
+  return !(
+    Math.max(image.naturalWidth, image.naturalHeight) < MIN_NATURAL_WIDTH &&
+    Math.min(image.naturalWidth, image.naturalHeight) < MIN_NATURAL_HEIGHT
+  );
 }
 
+function getViewportPriority(image: HTMLImageElement): 0 | 1 | 2 {
+  const rect = image.getBoundingClientRect();
+  if (rect.bottom >= 0 && rect.top <= window.innerHeight) {
+    return 0;
+  }
+  if (rect.bottom >= -window.innerHeight && rect.top <= window.innerHeight * 2) {
+    return 1;
+  }
+  return 2;
+}
+
+function containsDiscoveryMedia(node: Node): boolean {
+  if (
+    node instanceof HTMLImageElement ||
+    node instanceof HTMLSourceElement ||
+    node instanceof HTMLScriptElement
+  ) {
+    return true;
+  }
+  return node instanceof Element && Boolean(node.querySelector("img, picture > source, script"));
+}
+
+/** Continuously discovers adapter-approved images and reports source revisions once. */
 export class ImageDiscovery {
   private readonly adapters: ReadonlyArray<SiteAdapterDefinition>;
 
-  private readonly observedImages = new WeakSet<HTMLImageElement>();
+  private readonly wiredImages = new WeakSet<HTMLImageElement>();
 
-  private processedSources = new WeakMap<HTMLImageElement, string>();
+  private readonly intersectionObservedImages = new WeakSet<HTMLImageElement>();
+
+  private processedSources = new WeakMap<HTMLImageElement, ProcessedSourceState>();
 
   private readonly intersectionObserver: IntersectionObserver;
 
   private readonly mutationObserver: MutationObserver;
 
   private readonly onImageEligible: (candidate: DiscoveredImageCandidate) => void;
+
+  private readonly onImageRemoved?: (image: HTMLImageElement) => void;
 
   private readonly eagerScanEnabled: boolean;
 
@@ -74,6 +139,7 @@ export class ImageDiscovery {
   constructor(options: ImageDiscoveryOptions) {
     this.adapters = options.adapters;
     this.onImageEligible = options.onImageEligible;
+    this.onImageRemoved = options.onImageRemoved;
     this.eagerScanEnabled = Boolean(options.eagerScanEnabled);
 
     this.intersectionObserver = new IntersectionObserver(
@@ -83,27 +149,33 @@ export class ImageDiscovery {
           if (!(image instanceof HTMLImageElement) || !entry.isIntersecting) {
             continue;
           }
-          this.processEligibleImage(image);
+          this.processCandidate(image, true);
         }
       },
       {
-        rootMargin: "600px 0px"
+        rootMargin: `${Math.max(1, window.innerHeight)}px 0px`
       }
     );
 
     this.mutationObserver = new MutationObserver((records) => {
-      this.refreshAdapterRoots();
+      const hasTreeChanges = records.some(
+        (record) => record.type === "childList" &&
+          [...record.addedNodes, ...record.removedNodes].some(containsDiscoveryMedia)
+      );
+      if (hasTreeChanges) {
+        this.prepareAdapters();
+        this.refreshAdapterRoots();
+      }
 
       for (const record of records) {
-        if (record.type === "attributes" && record.target instanceof HTMLImageElement) {
-          this.maybeObserveImage(record.target);
+        if (record.type === "attributes") {
+          this.handleAttributeMutation(record.target);
           continue;
         }
 
-        if (record.target instanceof Element && this.isAdapterRoot(record.target)) {
-          this.scanNode(record.target);
+        for (const node of record.removedNodes) {
+          this.handleRemovedNode(node);
         }
-
         for (const node of record.addedNodes) {
           this.scanNode(node);
         }
@@ -111,35 +183,62 @@ export class ImageDiscovery {
     });
   }
 
-  start(): void {
-    this.refreshAdapterRoots();
-    this.scanActiveRoots();
-
-    this.mutationObserver.observe(document.body, {
+  /** Start the initial scan and install continuous DOM observers. */
+  start(): ImageScanReport {
+    const report = this.rescan();
+    const observationRoot = document.body ?? document.documentElement;
+    this.mutationObserver.observe(observationRoot, {
       subtree: true,
       childList: true,
       attributes: true,
-      attributeFilter: ["src", "srcset"]
+      attributeFilter: [
+        ...OBSERVED_IMAGE_ATTRIBUTES,
+        ...OBSERVED_SOURCE_ATTRIBUTES
+      ]
     });
+    return report;
   }
 
+  /** Forget emission keys so a previously disabled controller can receive the current page. */
   reset(): void {
-    this.processedSources = new WeakMap<HTMLImageElement, string>();
+    this.processedSources = new WeakMap<HTMLImageElement, ProcessedSourceState>();
   }
 
-  rescan(): void {
+  /** Inspect every active root once and return a synchronous, user-facing summary. */
+  rescan(): ImageScanReport {
+    this.prepareAdapters();
     this.refreshAdapterRoots();
-    this.scanActiveRoots();
+    const report = createEmptyScanReport();
+    const images = new Set<HTMLImageElement>();
+
+    for (const root of this.collectActiveRoots()) {
+      if (root instanceof HTMLImageElement) {
+        images.add(root);
+      }
+      for (const image of root.querySelectorAll<HTMLImageElement>("img")) {
+        images.add(image);
+      }
+    }
+
+    for (const image of images) {
+      report.inspected += 1;
+      const result = this.maybeObserveImage(image);
+      report.candidates += Number(result.candidate);
+      report.added += Number(result.added);
+      report.waitingForLoad += Number(result.waitingForLoad);
+    }
+    return report;
   }
 
+  /** Disconnect all observers without changing the page's image elements. */
   stop(): void {
     this.intersectionObserver.disconnect();
     this.mutationObserver.disconnect();
   }
 
-  private scanActiveRoots(): void {
-    for (const root of this.collectActiveRoots()) {
-      this.scanNode(root);
+  private prepareAdapters(): void {
+    for (const adapter of this.adapters) {
+      adapter.prepareScan?.(document);
     }
   }
 
@@ -147,82 +246,147 @@ export class ImageDiscovery {
     if (!node) {
       return;
     }
-
     if (node instanceof HTMLImageElement) {
       this.maybeObserveImage(node);
       return;
     }
-
+    if (node instanceof HTMLSourceElement) {
+      this.handlePictureSource(node);
+      return;
+    }
     if (node instanceof Element) {
-      for (const image of node.querySelectorAll("img")) {
+      for (const image of node.querySelectorAll<HTMLImageElement>("img")) {
         this.maybeObserveImage(image);
       }
+      for (const source of node.querySelectorAll<HTMLSourceElement>("picture > source")) {
+        this.handlePictureSource(source);
+      }
     }
   }
 
-  private maybeObserveImage(image: HTMLImageElement): void {
-    const adapter = this.resolveAdapterForImage(image);
-    if (!adapter) {
+  private handleAttributeMutation(target: Node): void {
+    if (target instanceof HTMLImageElement) {
+      this.maybeObserveImage(target);
       return;
     }
+    if (target instanceof HTMLSourceElement) {
+      this.handlePictureSource(target);
+    }
+  }
 
-    if (this.eagerScanEnabled) {
-      if (!image.complete) {
-        // 整页模式要求在图片一加载完成就立即入队，避免用户必须滚动到目标区域才触发翻译。
-        image.addEventListener("load", () => this.processEligibleImage(image), {
-          once: true
-        });
-        return;
-      }
-
-      this.processEligibleImage(image, adapter);
+  private handlePictureSource(source: HTMLSourceElement): void {
+    const picture = source.closest("picture");
+    const image = picture?.querySelector<HTMLImageElement>("img") ?? null;
+    if (!image) {
       return;
     }
+    // currentSrc may settle after the source attribute mutation microtask.
+    queueMicrotask(() => this.maybeObserveImage(image));
+  }
 
-    if (this.observedImages.has(image)) {
+  private handleRemovedNode(node: Node): void {
+    const images: HTMLImageElement[] = [];
+    if (node instanceof HTMLImageElement) {
+      images.push(node);
+    } else if (node instanceof Element) {
+      images.push(...node.querySelectorAll<HTMLImageElement>("img"));
+    }
+
+    for (const image of images) {
+      this.intersectionObserver.unobserve(image);
+      this.intersectionObservedImages.delete(image);
+      this.processedSources.delete(image);
+      this.onImageRemoved?.(image);
+    }
+  }
+
+  private maybeObserveImage(image: HTMLImageElement): ProcessResult {
+    if (!this.wiredImages.has(image)) {
+      this.wiredImages.add(image);
+      image.addEventListener("load", () => this.processCandidate(image, true));
+    }
+
+    const priority = getViewportPriority(image);
+    const processNow = this.eagerScanEnabled || priority <= 1;
+    const result = this.processCandidate(image, processNow);
+
+    if (!this.eagerScanEnabled && !this.intersectionObservedImages.has(image)) {
+      this.intersectionObservedImages.add(image);
+      this.intersectionObserver.observe(image);
+    } else if (!this.eagerScanEnabled) {
       this.intersectionObserver.unobserve(image);
       this.intersectionObserver.observe(image);
-      return;
     }
-
-    this.observedImages.add(image);
-    if (!image.complete) {
-      image.addEventListener("load", () => this.intersectionObserver.observe(image), {
-        once: true
-      });
-    }
-    this.intersectionObserver.observe(image);
+    return result;
   }
 
-  private processEligibleImage(
-    image: HTMLImageElement,
-    adapterOverride?: SiteAdapterDefinition
-  ): void {
-    const adapter = adapterOverride ?? this.resolveAdapterForImage(image);
+  private processCandidate(image: HTMLImageElement, allowEmission: boolean): ProcessResult {
+    const previous = this.processedSources.get(image);
+    const adapter = this.resolveAdapterForImage(image);
     if (!adapter) {
-      return;
+      this.invalidatePreviousCandidate(image, previous);
+      return { candidate: false, added: false, waitingForLoad: false };
     }
 
     const sourceUrl = adapter.resolveImageSource(image);
     if (!sourceUrl) {
-      return;
+      this.invalidatePreviousCandidate(image, previous);
+      return { candidate: false, added: false, waitingForLoad: false };
     }
 
-    const processedKey = `${adapter.id}|${sourceUrl}`;
-    if (this.processedSources.get(image) === processedKey) {
-      return;
+    const key = `${adapter.id}|${sourceUrl}`;
+    if (!isVisibleCandidate(image, sourceUrl)) {
+      if (previous?.key !== key) {
+        this.invalidatePreviousCandidate(image, previous);
+      }
+      return { candidate: false, added: false, waitingForLoad: false };
     }
 
-    if (!isEligibleRasterImage(image, sourceUrl)) {
-      return;
+    const readyForPreparation = Boolean(
+      image.complete &&
+      image.naturalWidth > 0 &&
+      image.naturalHeight > 0 &&
+      isImageDisplayingSource(image, sourceUrl)
+    );
+    if (readyForPreparation && !isEligibleRasterImage(image, sourceUrl)) {
+      if (previous?.key !== key) {
+        this.invalidatePreviousCandidate(image, previous);
+      }
+      return { candidate: false, added: false, waitingForLoad: false };
     }
 
-    this.processedSources.set(image, processedKey);
-    this.onImageEligible({
-      image,
-      sourceUrl,
-      adapterId: adapter.id
-    });
+    const added = previous?.key !== key;
+    const priority = getViewportPriority(image);
+    if (
+      allowEmission &&
+      (added || previous?.ready !== readyForPreparation || priority < (previous?.priority ?? 3))
+    ) {
+      this.processedSources.set(image, { key, ready: readyForPreparation, priority });
+      this.onImageEligible({
+        image,
+        sourceUrl,
+        adapterId: adapter.id,
+        readyForPreparation,
+        priority
+      });
+    }
+
+    return {
+      candidate: true,
+      added: allowEmission && added,
+      waitingForLoad: !readyForPreparation
+    };
+  }
+
+  private invalidatePreviousCandidate(
+    image: HTMLImageElement,
+    previous: ProcessedSourceState | undefined
+  ): void {
+    if (!previous) {
+      return;
+    }
+    this.processedSources.delete(image);
+    this.onImageRemoved?.(image);
   }
 
   private resolveAdapterForImage(image: HTMLImageElement): SiteAdapterDefinition | null {
@@ -236,13 +400,11 @@ export class ImageDiscovery {
         return adapter;
       }
     }
-
     return null;
   }
 
   private refreshAdapterRoots(): void {
     const nextRoots = new Map<string, Element[]>();
-
     for (const adapter of this.adapters) {
       const roots = new Set<Element>();
       for (const selector of adapter.getRootSelectors()) {
@@ -252,7 +414,6 @@ export class ImageDiscovery {
       }
       nextRoots.set(adapter.id, Array.from(roots));
     }
-
     this.adapterRoots = nextRoots;
   }
 
@@ -264,14 +425,5 @@ export class ImageDiscovery {
       }
     }
     return Array.from(roots);
-  }
-
-  private isAdapterRoot(element: Element): boolean {
-    for (const adapterRoots of this.adapterRoots.values()) {
-      if (adapterRoots.includes(element)) {
-        return true;
-      }
-    }
-    return false;
   }
 }

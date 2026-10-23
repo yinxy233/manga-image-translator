@@ -60,6 +60,7 @@ function createOverlay(
     onSaveSettings: vi.fn(),
     onToggleImageOriginal: vi.fn(),
     onRetryImage: vi.fn(),
+    onRetryImageWithPixels: vi.fn(),
     onCancelImage: vi.fn(),
     onIgnoreImage: vi.fn(),
     ...callbackOverrides
@@ -67,7 +68,7 @@ function createOverlay(
 }
 
 describe("OverlayManager", () => {
-  it("mounts image status inside the image container and toggles compact details", () => {
+  it("mounts image status inside the image container and toggles compact details", async () => {
     const container = document.createElement("div");
     container.getBoundingClientRect = () =>
       ({
@@ -100,10 +101,14 @@ describe("OverlayManager", () => {
         showOriginal: false,
         queuePosition: null,
         canRetry: false,
+        canRetryWithPixels: false,
         canCancel: false,
-        canIgnore: false
+        canIgnore: false,
+        preparationStage: null,
+        sourceProgress: null
       }
     ]);
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
 
     const overlayHost = container.querySelector('[data-mit-inline-status="image-1"]') as HTMLDivElement;
     const badge = overlayHost.shadowRoot?.querySelector(".mit-status-card") as HTMLDivElement;
@@ -469,6 +474,134 @@ describe("OverlayManager", () => {
       y: 102
     });
 
+    overlay.destroy();
+  });
+
+  it("shows aggregate progress and automatically expands the latest error", async () => {
+    const container = document.createElement("div");
+    const image = document.createElement("img");
+    container.getBoundingClientRect = () => ({
+      left: 0,
+      top: 0,
+      width: 500,
+      height: 800
+    }) as DOMRect;
+    image.getBoundingClientRect = () => ({
+      left: 0,
+      top: 0,
+      width: 500,
+      height: 800
+    }) as DOMRect;
+    container.append(image);
+    document.body.append(container);
+    const overlay = createOverlay();
+
+    overlay.updateChrome({
+      globalShowOriginal: false,
+      connection: { label: "就绪", tone: "success" },
+      session: {
+        enabled: true,
+        listening: true,
+        reading: 1,
+        queued: 2,
+        processing: 1,
+        completed: 3,
+        errors: 1,
+        total: 7
+      }
+    });
+    overlay.renderImages([{
+      id: "failed-image",
+      image,
+      status: "error",
+      message: "图床请求超时，可重试",
+      resultUrl: null,
+      showOriginal: false,
+      queuePosition: null,
+      canRetry: true,
+      canRetryWithPixels: true,
+      canCancel: false,
+      canIgnore: true,
+      preparationStage: "error",
+      sourceProgress: null
+    }]);
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+
+    const launcherProgress = overlay.shadowRoot.querySelector(".mit-launcher-progress");
+    const values = Array.from(
+      overlay.shadowRoot.querySelectorAll(".mit-stat-value"),
+      (node) => node.textContent
+    );
+    const host = container.querySelector('[data-mit-inline-status="failed-image"]') as HTMLDivElement;
+    const badge = host.shadowRoot?.querySelector(".mit-status-card") as HTMLDivElement;
+    const compact = host.shadowRoot?.querySelector(".mit-compact-toggle") as HTMLButtonElement;
+    const pixelRetry = Array.from(
+      host.shadowRoot?.querySelectorAll(".mit-btn") ?? []
+    ).find((button) => button.textContent === "使用页面像素重试") as HTMLButtonElement;
+
+    expect(launcherProgress?.textContent).toBe("3/7");
+    expect(values).toEqual(["1", "2", "1", "3", "1"]);
+    expect(badge.dataset.expanded).toBe("true");
+    expect(badge.getAttribute("role")).toBe("alert");
+    expect(compact.getAttribute("aria-expanded")).toBe("true");
+    expect(pixelRetry.hidden).toBe(false);
+    expect(overlay.shadowRoot.querySelector(".mit-toast-layer")?.getAttribute("aria-live")).toBe("polite");
+    overlay.destroy();
+  });
+
+  it("batches dense viewport changes into one geometry read and ignores scroll", async () => {
+    const container = document.createElement("div");
+    const image = document.createElement("img");
+    container.getBoundingClientRect = () => ({
+      left: 0,
+      top: 0,
+      width: 400,
+      height: 600
+    }) as DOMRect;
+    const imageRect = vi.fn(() => ({
+      left: 0,
+      top: 0,
+      width: 400,
+      height: 600
+    }) as DOMRect);
+    image.getBoundingClientRect = imageRect;
+    container.append(image);
+    document.body.append(container);
+    const overlay = createOverlay();
+    overlay.renderImages([{
+      id: "image-geometry",
+      image,
+      status: "pending",
+      message: "读取原图",
+      resultUrl: null,
+      showOriginal: false,
+      queuePosition: null,
+      canRetry: false,
+      canRetryWithPixels: false,
+      canCancel: true,
+      canIgnore: true,
+      preparationStage: "reading-source",
+      sourceProgress: null
+    }]);
+    for (let index = 0; index < 8; index += 1) {
+      window.dispatchEvent(new Event("resize"));
+    }
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    expect(imageRect).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new Event("scroll"));
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    expect(imageRect).toHaveBeenCalledTimes(1);
+    overlay.destroy();
+  });
+
+  it("includes coarse-pointer touch targets and reduced-motion overrides", () => {
+    const overlay = createOverlay();
+    const styleText = overlay.shadowRoot.querySelector("style")?.textContent ?? "";
+
+    expect(styleText).toContain("width: 44px");
+    expect(styleText).toContain("min-height: 44px");
+    expect(styleText).toContain("@media (prefers-reduced-motion: reduce)");
     overlay.destroy();
   });
 });

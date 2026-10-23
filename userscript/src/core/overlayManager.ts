@@ -21,14 +21,13 @@ import type {
   ConnectionState,
   LauncherPosition,
   OverlayViewModel,
-  QueueStats,
+  TranslationSessionState,
   UserscriptSettings
 } from "../types";
 
 interface OverlayManagerState {
-  enabled: boolean;
   globalShowOriginal: boolean;
-  queueStats: QueueStats;
+  session: TranslationSessionState;
   connection: ConnectionState;
 }
 
@@ -43,6 +42,7 @@ export interface OverlayManagerCallbacks {
   onSaveSettings: (settings: UserscriptSettings) => void;
   onToggleImageOriginal: (id: string) => void;
   onRetryImage: (id: string) => void;
+  onRetryImageWithPixels: (id: string) => void;
   onCancelImage: (id: string) => void;
   onIgnoreImage: (id: string) => void;
 }
@@ -57,8 +57,10 @@ interface OverlayItemRefs {
   details: HTMLDivElement;
   status: HTMLSpanElement;
   queue: HTMLSpanElement;
+  progress: HTMLSpanElement;
   toggle: HTMLButtonElement;
   retry: HTMLButtonElement;
+  retryPixels: HTMLButtonElement;
   cancel: HTMLButtonElement;
   ignore: HTMLButtonElement;
 }
@@ -106,7 +108,53 @@ function deriveAdapterTone(adapterState: SiteAdapterState): "active" | "matched"
   return adapterState.enabled ? "idle" : "disabled";
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function describeSourceProgress(viewModel: OverlayViewModel): string {
+  const progress = viewModel.sourceProgress;
+  if (!progress) {
+    return "";
+  }
+  if (progress.stage === "retrying") {
+    return "网络恢复后自动重试（最后一次）";
+  }
+  if (progress.stage === "pixels") {
+    return "正在读取页面像素";
+  }
+
+  const elapsed = progress.elapsedMs >= 300
+    ? ` · ${(progress.elapsedMs / 1000).toFixed(1)} 秒`
+    : "";
+  if (progress.totalBytes) {
+    return `${formatBytes(progress.loadedBytes)} / ${formatBytes(progress.totalBytes)}${elapsed}`;
+  }
+  return progress.loadedBytes > 0
+    ? `${formatBytes(progress.loadedBytes)}${elapsed}`
+    : elapsed.replace(/^ · /, "");
+}
+
+const SHARED_SEMANTIC_STYLE_TEXT = `
+  :host {
+    --mit-font-family: "Avenir Next", "Segoe UI Variable", "PingFang SC", "Hiragino Sans GB", sans-serif;
+    --mit-surface-dark: rgba(17, 24, 39, 0.62);
+    --mit-surface-success: rgba(22, 101, 52, 0.76);
+    --mit-surface-error: rgba(153, 27, 27, 0.78);
+    --mit-focus-ring: rgba(96, 165, 250, 0.38);
+    --mit-motion-fast: 160ms;
+    --mit-motion-normal: 180ms;
+  }
+`;
+
 const STYLE_TEXT = `
+  ${SHARED_SEMANTIC_STYLE_TEXT}
   :host {
     all: initial;
   }
@@ -114,7 +162,7 @@ const STYLE_TEXT = `
   .mit-root,
   .mit-root * {
     box-sizing: border-box;
-    font-family: "Avenir Next", "Segoe UI Variable", "PingFang SC", "Hiragino Sans GB", sans-serif;
+    font-family: var(--mit-font-family);
   }
 
   .mit-root {
@@ -185,7 +233,8 @@ const STYLE_TEXT = `
     font-weight: 700;
   }
 
-  .mit-status-queue {
+  .mit-status-queue,
+  .mit-status-progress {
     margin-top: 4px;
     font-size: 10px;
     opacity: 0.84;
@@ -225,6 +274,12 @@ const STYLE_TEXT = `
 
   .mit-compact-toggle[data-status="error"] {
     background: rgba(153, 27, 27, 0.78);
+  }
+
+  .mit-compact-toggle:focus-visible,
+  .mit-btn:focus-visible {
+    outline: 3px solid var(--mit-focus-ring);
+    outline-offset: 2px;
   }
 
   .mit-compact-toggle::after {
@@ -453,7 +508,7 @@ const STYLE_TEXT = `
 
   .mit-stats {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 8px;
   }
 
@@ -625,6 +680,24 @@ const STYLE_TEXT = `
     line-height: 1;
     letter-spacing: 0.08em;
     transform: translateX(1px);
+  }
+
+  .mit-launcher-progress {
+    position: absolute;
+    z-index: 2;
+    right: 3px;
+    bottom: 3px;
+    min-width: 24px;
+    min-height: 18px;
+    padding: 3px 5px;
+    border-radius: 999px;
+    background: rgba(15, 23, 42, 0.92);
+    color: #ffffff;
+    border: 1px solid rgba(255, 255, 255, 0.32);
+    font-size: 9px;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
   }
 
   .mit-launcher-icon,
@@ -927,7 +1000,8 @@ const STYLE_TEXT = `
 
   @media (pointer: coarse) {
     .mit-btn {
-      min-height: 42px;
+      min-width: 44px;
+      min-height: 44px;
       font-size: 13px;
     }
 
@@ -958,8 +1032,8 @@ const STYLE_TEXT = `
     }
 
     .mit-compact-toggle {
-      width: 30px;
-      height: 30px;
+      width: 44px;
+      height: 44px;
       font-size: 13px;
     }
 
@@ -970,7 +1044,18 @@ const STYLE_TEXT = `
     .mit-input,
     .mit-select,
     .mit-switch {
-      min-height: 42px;
+      min-height: 44px;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .mit-root *,
+    .mit-root *::before,
+    .mit-root *::after {
+      scroll-behavior: auto !important;
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
     }
   }
 
@@ -1053,6 +1138,7 @@ const STYLE_TEXT = `
 `;
 
 const ITEM_STYLE_TEXT = `
+  ${SHARED_SEMANTIC_STYLE_TEXT}
   :host {
     all: initial;
     position: absolute;
@@ -1066,7 +1152,7 @@ const ITEM_STYLE_TEXT = `
   :host,
   :host * {
     box-sizing: border-box;
-    font-family: "Avenir Next", "Segoe UI Variable", "PingFang SC", "Hiragino Sans GB", sans-serif;
+    font-family: var(--mit-font-family);
   }
 
   .mit-status-card {
@@ -1117,7 +1203,8 @@ const ITEM_STYLE_TEXT = `
     font-weight: 700;
   }
 
-  .mit-status-queue {
+  .mit-status-queue,
+  .mit-status-progress {
     margin-top: 4px;
     font-size: 10px;
     opacity: 0.84;
@@ -1157,6 +1244,12 @@ const ITEM_STYLE_TEXT = `
 
   .mit-compact-toggle[data-status="error"] {
     background: rgba(153, 27, 27, 0.78);
+  }
+
+  .mit-compact-toggle:focus-visible,
+  .mit-btn:focus-visible {
+    outline: 3px solid var(--mit-focus-ring);
+    outline-offset: 2px;
   }
 
   .mit-compact-toggle::after {
@@ -1297,14 +1390,25 @@ const ITEM_STYLE_TEXT = `
 
   @media (pointer: coarse) {
     .mit-btn {
-      min-height: 42px;
+      min-width: 44px;
+      min-height: 44px;
       font-size: 13px;
     }
 
     .mit-compact-toggle {
-      width: 30px;
-      height: 30px;
+      width: 44px;
+      height: 44px;
       font-size: 13px;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :host *,
+    :host *::before,
+    :host *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
     }
   }
 
@@ -1327,6 +1431,32 @@ const ITEM_STYLE_TEXT = `
   }
 `;
 
+let sharedItemStyleSheet: CSSStyleSheet | null | undefined;
+
+function installItemStyles(shadowRoot: ShadowRoot): void {
+  if (sharedItemStyleSheet === undefined) {
+    sharedItemStyleSheet = null;
+    try {
+      const sheet = new CSSStyleSheet();
+      if (typeof sheet.replaceSync === "function") {
+        sheet.replaceSync(ITEM_STYLE_TEXT);
+        sharedItemStyleSheet = sheet;
+      }
+    } catch {
+      // Older userscript browsers use the compatible inline-style fallback.
+    }
+  }
+
+  if (sharedItemStyleSheet && "adoptedStyleSheets" in shadowRoot) {
+    shadowRoot.adoptedStyleSheets = [sharedItemStyleSheet];
+    return;
+  }
+
+  const style = document.createElement("style");
+  style.textContent = ITEM_STYLE_TEXT;
+  shadowRoot.append(style);
+}
+
 /** Owns the isolated userscript controls and per-image status overlays. */
 export class OverlayManager {
   readonly shadowRoot: ShadowRoot;
@@ -1347,6 +1477,8 @@ export class OverlayManager {
 
   private readonly translateLauncher: HTMLButtonElement;
 
+  private readonly launcherProgress: HTMLSpanElement;
+
   private readonly settingsLauncher: HTMLButtonElement;
 
   private readonly startPauseButton: HTMLButtonElement;
@@ -1360,6 +1492,8 @@ export class OverlayManager {
   private readonly collapseButton: HTMLButtonElement;
 
   private readonly queueValue: HTMLSpanElement;
+
+  private readonly readingValue: HTMLSpanElement;
 
   private readonly runningValue: HTMLSpanElement;
 
@@ -1425,6 +1559,8 @@ export class OverlayManager {
 
   private readonly mountTargetStates = new WeakMap<HTMLElement, MountTargetState>();
 
+  private readonly resizeObserver: ResizeObserver | null;
+
   private viewModels = new Map<string, OverlayViewModel>();
 
   private readonly expandedCompactItems = new Set<string>();
@@ -1438,6 +1574,8 @@ export class OverlayManager {
   private launcherDragState: LauncherDragState | null = null;
 
   private suppressLauncherClick = false;
+
+  private positionFrame: number | null = null;
 
   constructor(
     settings: UserscriptSettings,
@@ -1459,6 +1597,8 @@ export class OverlayManager {
 
     this.toastLayer = document.createElement("div");
     this.toastLayer.className = "mit-toast-layer";
+    this.toastLayer.setAttribute("aria-live", "polite");
+    this.toastLayer.setAttribute("aria-atomic", "true");
 
     this.dock = document.createElement("div");
     this.dock.className = "mit-dock";
@@ -1466,6 +1606,10 @@ export class OverlayManager {
     this.launcherGroup = document.createElement("div");
     this.launcherGroup.className = "mit-launcher-group";
     this.translateLauncher = this.createLauncherButton("translate", "译", "一键翻译当前页");
+    this.launcherProgress = document.createElement("span");
+    this.launcherProgress.className = "mit-launcher-progress";
+    this.launcherProgress.hidden = true;
+    this.translateLauncher.append(this.launcherProgress);
     this.settingsLauncher = this.createLauncherButton("settings", "", "打开设置", createGearIcon("mit-launcher-icon"));
     this.launcherGroup.append(this.settingsLauncher, this.translateLauncher);
 
@@ -1483,6 +1627,7 @@ export class OverlayManager {
     this.collapseButton.dataset.utility = "true";
     this.collapseButton.classList.add("mit-collapse-btn");
     this.queueValue = document.createElement("span");
+    this.readingValue = document.createElement("span");
     this.runningValue = document.createElement("span");
     this.doneValue = document.createElement("span");
     this.errorValue = document.createElement("span");
@@ -1517,7 +1662,9 @@ export class OverlayManager {
     root.append(this.dock, this.launcherGroup, this.toastLayer);
     this.shadowRoot.append(style, root);
 
-    window.addEventListener("scroll", this.handleViewportChange, { passive: true });
+    this.resizeObserver = typeof ResizeObserver === "function"
+      ? new ResizeObserver(() => this.syncPositions())
+      : null;
     window.addEventListener("resize", this.handleViewportChange, { passive: true });
 
     this.bindControls();
@@ -1527,16 +1674,22 @@ export class OverlayManager {
   }
 
   updateChrome(state: OverlayManagerState): void {
-    this.startPauseButton.textContent = state.enabled ? "暂停排队" : "启动本页";
+    const { session } = state;
+    this.startPauseButton.textContent = session.enabled ? "暂停新任务" : "启动本页";
     this.globalToggleButton.textContent = state.globalShowOriginal ? "显示译图" : "显示原图";
-    this.queueValue.textContent = String(state.queueStats.queued);
-    this.runningValue.textContent = String(state.queueStats.running);
-    this.doneValue.textContent = String(state.queueStats.completed);
-    this.errorValue.textContent = String(state.queueStats.errors);
+    this.readingValue.textContent = String(session.reading);
+    this.queueValue.textContent = String(session.queued);
+    this.runningValue.textContent = String(session.processing);
+    this.doneValue.textContent = String(session.completed);
+    this.errorValue.textContent = String(session.errors);
     this.connectionPill.dataset.tone = state.connection.tone;
     this.connectionPill.textContent = state.connection.label;
-    this.translateLauncher.dataset.active = String(state.enabled);
-    const translateLabel = state.enabled ? "重新扫描当前页" : "一键翻译当前页";
+    this.translateLauncher.dataset.active = String(session.enabled);
+    this.launcherProgress.hidden = session.total === 0;
+    this.launcherProgress.textContent = `${session.completed}/${session.total}`;
+    const translateLabel = session.enabled
+      ? `重新扫描当前页，已完成 ${session.completed}/${session.total}`
+      : "一键翻译当前页";
     this.translateLauncher.title = translateLabel;
     this.translateLauncher.setAttribute("aria-label", translateLabel);
   }
@@ -1603,11 +1756,27 @@ export class OverlayManager {
   }
 
   renderImages(viewModels: OverlayViewModel[]): void {
+    const previousViewModels = this.viewModels;
+    let newestErrorId: string | null = null;
+    for (const viewModel of viewModels) {
+      if (viewModel.status === "error" && previousViewModels.get(viewModel.id)?.status !== "error") {
+        newestErrorId = viewModel.id;
+      }
+    }
+    if (newestErrorId) {
+      this.expandedCompactItems.clear();
+      this.expandedCompactItems.add(newestErrorId);
+    }
+
     this.viewModels = new Map(viewModels.map((viewModel) => [viewModel.id, viewModel]));
 
     const nextIds = new Set(this.viewModels.keys());
     for (const [id, refs] of this.itemRefs.entries()) {
       if (!nextIds.has(id)) {
+        const previousImage = previousViewModels.get(id)?.image;
+        if (previousImage) {
+          this.resizeObserver?.unobserve(previousImage);
+        }
         this.mountOverlayItem(refs, null);
         refs.host.remove();
         this.itemRefs.delete(id);
@@ -1620,45 +1789,106 @@ export class OverlayManager {
       refs.badge.dataset.status = viewModel.status;
       refs.badge.dataset.compact = "true";
       refs.badge.dataset.expanded = String(this.expandedCompactItems.has(viewModel.id));
+      if (viewModel.status === "error") {
+        refs.badge.setAttribute("role", "alert");
+      } else {
+        refs.badge.removeAttribute("role");
+      }
       refs.status.textContent = viewModel.message;
       refs.queue.textContent = viewModel.queuePosition ? `队列位置 #${viewModel.queuePosition}` : "";
       refs.queue.style.display = viewModel.queuePosition ? "block" : "none";
+      const progressText = describeSourceProgress(viewModel);
+      refs.progress.textContent = progressText;
+      refs.progress.style.display = progressText ? "block" : "none";
       refs.compactToggle.dataset.status = viewModel.status;
       refs.compactToggle.title = viewModel.message;
       refs.compactToggle.setAttribute("aria-label", viewModel.message);
+      refs.compactToggle.setAttribute(
+        "aria-expanded",
+        String(this.expandedCompactItems.has(viewModel.id))
+      );
+      const completeAndCollapsed =
+        viewModel.status === "complete" && !this.expandedCompactItems.has(viewModel.id);
+      refs.compactToggle.tabIndex = completeAndCollapsed ? -1 : 0;
+      refs.compactToggle.setAttribute("aria-hidden", String(completeAndCollapsed));
       refs.toggle.textContent = viewModel.showOriginal ? "显示译图" : "显示原图";
       refs.toggle.hidden = !viewModel.resultUrl;
       refs.retry.hidden = !viewModel.canRetry;
+      refs.retryPixels.hidden = !viewModel.canRetryWithPixels;
       refs.cancel.hidden = !viewModel.canCancel;
       refs.ignore.hidden = !viewModel.canIgnore;
+
+      const mountTarget = this.resolveMountTarget(viewModel.image);
+      this.mountOverlayItem(
+        refs,
+        viewModel.image.isConnected && mountTarget?.isConnected ? mountTarget : null
+      );
+      this.resizeObserver?.observe(viewModel.image);
     }
 
     this.syncPositions();
   }
 
   syncPositions(): void {
+    if (this.positionFrame !== null) {
+      return;
+    }
+    const schedule = typeof window.requestAnimationFrame === "function"
+      ? window.requestAnimationFrame.bind(window)
+      : (callback: FrameRequestCallback) => window.setTimeout(() => callback(performance.now()), 16);
+    this.positionFrame = schedule(() => {
+      this.positionFrame = null;
+      this.flushPositions();
+    });
+  }
+
+  private flushPositions(): void {
+    const measurements: Array<{
+      refs: OverlayItemRefs;
+      visible: boolean;
+      left: number;
+      top: number;
+      width: number;
+      height: number;
+    }> = [];
+
+    // Phase one performs every layout read before any positional style write.
     for (const [id, viewModel] of this.viewModels.entries()) {
       const refs = this.itemRefs.get(id);
       if (!refs) {
         continue;
       }
 
-      const mountTarget = this.resolveMountTarget(viewModel.image);
+      const mountTarget = refs.mountTarget;
       const rect = viewModel.image.getBoundingClientRect();
       if (!viewModel.image.isConnected || !mountTarget?.isConnected || rect.width <= 0 || rect.height <= 0) {
-        refs.host.style.display = "none";
-        this.mountOverlayItem(refs, null);
+        measurements.push({ refs, visible: false, left: 0, top: 0, width: 0, height: 0 });
         continue;
       }
 
-      this.mountOverlayItem(refs, mountTarget);
-
       const mountRect = mountTarget.getBoundingClientRect();
+      measurements.push({
+        refs,
+        visible: true,
+        left: rect.left - mountRect.left,
+        top: rect.top - mountRect.top,
+        width: rect.width,
+        height: rect.height
+      });
+    }
+
+    // Phase two writes the measured geometry without forcing another layout.
+    for (const measurement of measurements) {
+      const { refs } = measurement;
+      if (!measurement.visible) {
+        refs.host.style.display = "none";
+        continue;
+      }
       refs.host.style.display = "block";
-      refs.host.style.left = `${rect.left - mountRect.left}px`;
-      refs.host.style.top = `${rect.top - mountRect.top}px`;
-      refs.host.style.width = `${rect.width}px`;
-      refs.host.style.height = `${rect.height}px`;
+      refs.host.style.left = `${measurement.left}px`;
+      refs.host.style.top = `${measurement.top}px`;
+      refs.host.style.width = `${measurement.width}px`;
+      refs.host.style.height = `${measurement.height}px`;
     }
   }
 
@@ -1666,14 +1896,25 @@ export class OverlayManager {
     const toast = document.createElement("div");
     toast.className = "mit-toast";
     toast.dataset.tone = tone;
+    if (tone === "error") {
+      toast.setAttribute("role", "alert");
+    }
     toast.textContent = message;
     this.toastLayer.appendChild(toast);
     window.setTimeout(() => toast.remove(), 3600);
   }
 
   destroy(): void {
-    window.removeEventListener("scroll", this.handleViewportChange);
     window.removeEventListener("resize", this.handleViewportChange);
+    if (this.positionFrame !== null) {
+      if (typeof window.cancelAnimationFrame === "function") {
+        window.cancelAnimationFrame(this.positionFrame);
+      } else {
+        window.clearTimeout(this.positionFrame);
+      }
+      this.positionFrame = null;
+    }
+    this.resizeObserver?.disconnect();
     this.stopLauncherDrag();
     for (const refs of this.itemRefs.values()) {
       this.mountOverlayItem(refs, null);
@@ -1709,6 +1950,7 @@ export class OverlayManager {
     const stats = document.createElement("div");
     stats.className = "mit-stats";
     stats.append(
+      this.createStatCard("读取", this.readingValue),
       this.createStatCard("排队", this.queueValue),
       this.createStatCard("处理中", this.runningValue),
       this.createStatCard("完成", this.doneValue),
@@ -2206,9 +2448,7 @@ export class OverlayManager {
     const host = document.createElement("div");
     host.dataset.mitInlineStatus = id;
     const itemShadowRoot = host.attachShadow({ mode: "open" });
-
-    const style = document.createElement("style");
-    style.textContent = ITEM_STYLE_TEXT;
+    installItemStyles(itemShadowRoot);
 
     const badge = document.createElement("div");
     badge.className = "mit-status-card";
@@ -2217,9 +2457,14 @@ export class OverlayManager {
     compactToggle.type = "button";
     compactToggle.className = "mit-compact-toggle";
     compactToggle.textContent = "翻";
+    const detailsId = `mit-status-details-${id}`;
+    compactToggle.setAttribute("aria-controls", detailsId);
+    compactToggle.setAttribute("aria-expanded", "false");
 
     const details = document.createElement("div");
     details.className = "mit-status-details";
+    details.id = detailsId;
+    details.setAttribute("aria-live", "polite");
 
     const head = document.createElement("div");
     head.className = "mit-status-head";
@@ -2232,17 +2477,22 @@ export class OverlayManager {
     const queue = document.createElement("span");
     queue.className = "mit-status-queue";
 
+    const progress = document.createElement("span");
+    progress.className = "mit-status-progress";
+
     const actions = document.createElement("div");
     actions.className = "mit-status-actions";
 
     const toggle = this.createButton("显示原图", "ghost");
     const retry = this.createButton("重试", "ghost");
+    const retryPixels = this.createButton("使用页面像素重试", "ghost");
     const cancel = this.createButton("取消", "danger");
     cancel.dataset.tone = "danger";
     const ignore = this.createButton("忽略", "ghost");
 
     toggle.addEventListener("click", () => this.callbacks.onToggleImageOriginal(id));
     retry.addEventListener("click", () => this.callbacks.onRetryImage(id));
+    retryPixels.addEventListener("click", () => this.callbacks.onRetryImageWithPixels(id));
     cancel.addEventListener("click", () => this.callbacks.onCancelImage(id));
     ignore.addEventListener("click", () => this.callbacks.onIgnoreImage(id));
     compactToggle.addEventListener("click", () => {
@@ -2255,10 +2505,10 @@ export class OverlayManager {
       this.renderImages(Array.from(this.viewModels.values()));
     });
 
-    actions.append(toggle, retry, cancel, ignore);
-    details.append(head, queue, actions);
+    actions.append(toggle, retry, retryPixels, cancel, ignore);
+    details.append(head, queue, progress, actions);
     badge.append(compactToggle, details);
-    itemShadowRoot.append(style, badge);
+    itemShadowRoot.append(badge);
 
     const refs: OverlayItemRefs = {
       host,
@@ -2268,8 +2518,10 @@ export class OverlayManager {
       details,
       status,
       queue,
+      progress,
       toggle,
       retry,
+      retryPixels,
       cancel,
       ignore
     };
@@ -2328,6 +2580,7 @@ export class OverlayManager {
       originalPosition,
       appliedRelativePosition
     });
+    this.resizeObserver?.observe(target);
   }
 
   private releaseMountTarget(target: HTMLElement): void {
@@ -2349,6 +2602,7 @@ export class OverlayManager {
       }
     }
 
+    this.resizeObserver?.unobserve(target);
     this.mountTargetStates.delete(target);
   }
 

@@ -77,20 +77,6 @@ function joinServerUrl(baseUrl: string, path: string): string {
   return new URL(path, `${baseUrl.replace(/\/+$/, "")}/`).toString();
 }
 
-function resolveImageFetchCredentials(imageUrl: string): RequestCredentials {
-  try {
-    const resolvedUrl = new URL(imageUrl, window.location.href);
-    if (resolvedUrl.origin === window.location.origin) {
-      return "same-origin";
-    }
-  } catch {
-    return "same-origin";
-  }
-
-  // 某些图床允许跨域匿名读取，但会拒绝带 Cookie 的脚本抓取；跨域图默认去掉凭据，避免触发 ACAO=* 与凭据模式冲突。
-  return "omit";
-}
-
 function buildHeaders(settings: UserscriptSettings): Record<string, string> {
   if (!settings.apiKey.trim()) {
     return {};
@@ -440,26 +426,6 @@ export class TransportClient {
     }
   }
 
-  /** Fetch original compressed bytes through Fetch, then GM when required. */
-  async fetchImageBlob(imageUrl: string, signal?: AbortSignal): Promise<Blob> {
-    try {
-      const response = await this.fetchImpl(imageUrl, {
-        method: "GET",
-        credentials: resolveImageFetchCredentials(imageUrl),
-        signal
-      });
-      if (!response.ok) {
-        throw await toHttpStatusError(response);
-      }
-      return await response.blob();
-    } catch (error) {
-      if (isAbortError(error)) {
-        throw error;
-      }
-      return this.fetchImageBlobWithGM(imageUrl, signal);
-    }
-  }
-
   /** Translates one compressed source Blob using the negotiated server path. */
   async translateImage(options: TranslateImageOptions): Promise<Blob> {
     const settings = await this.resolveNegotiatedSettings(options.settings, options.signal);
@@ -569,39 +535,6 @@ export class TransportClient {
         },
         onerror: () => reject(new Error("Failed to reach the translation server.")),
         ontimeout: () => reject(new Error("Health check timed out."))
-      });
-
-      signal?.addEventListener("abort", () => request.abort(), { once: true });
-    });
-  }
-
-  private async fetchImageBlobWithGM(imageUrl: string, signal?: AbortSignal): Promise<Blob> {
-    return new Promise<Blob>((resolve, reject) => {
-      const request = this.gmRequest({
-        method: "GET",
-        url: imageUrl,
-        responseType: "blob",
-        fetch: true,
-        onload: (response) => {
-          if (response.status >= 400) {
-            reject(new HttpStatusError(response.status, response.responseText || `HTTP ${response.status}`));
-            return;
-          }
-
-          if (response.response instanceof Blob) {
-            resolve(response.response);
-            return;
-          }
-
-          if (response.response instanceof ArrayBuffer) {
-            resolve(new Blob([response.response]));
-            return;
-          }
-
-          reject(new Error("GM image request did not return a blob response."));
-        },
-        onerror: () => reject(new Error("Failed to fetch the source image.")),
-        ontimeout: () => reject(new Error("Image download timed out."))
       });
 
       signal?.addEventListener("abort", () => request.abort(), { once: true });

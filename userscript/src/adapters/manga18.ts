@@ -30,6 +30,16 @@ const CHAPTER_IMAGE_ROOT_SELECTORS = [
 ] as const;
 const ROOT_SELECTORS = [...CHAPTER_IMAGE_ROOT_SELECTORS, "body"];
 
+interface Manga18ScanContext {
+  document: Document;
+  scripts: HTMLScriptElement[];
+  slideSources: string[];
+  slideSourceSet: Set<string>;
+  indexedImages: HTMLImageElement[];
+}
+
+let scanContext: Manga18ScanContext | null = null;
+
 function isChapterPage(location: LocationLike): boolean {
   return SUPPORTED_HOSTS.has(location.hostname) && CHAPTER_PATH_PATTERN.test(location.pathname);
 }
@@ -124,41 +134,56 @@ function isPlaceholderImageSource(sourceUrl: string): boolean {
 }
 
 function collectIndexedChapterImages(document: Document): HTMLImageElement[] {
-  const roots = new Set<Element>();
+  const imageSelector = CHAPTER_IMAGE_ROOT_SELECTORS
+    .map((selector) => `${selector} img`)
+    .join(", ");
+  return Array.from(document.querySelectorAll<HTMLImageElement>(imageSelector));
+}
 
-  for (const selector of CHAPTER_IMAGE_ROOT_SELECTORS) {
-    for (const element of document.querySelectorAll(selector)) {
-      roots.add(element);
-    }
+function prepareManga18Scan(document: Document): void {
+  const slideSources = readSlideImageSources(document);
+  scanContext = {
+    document,
+    scripts: Array.from(document.scripts),
+    slideSources,
+    slideSourceSet: new Set(slideSources),
+    indexedImages: collectIndexedChapterImages(document)
+  };
+}
+
+function getScanContext(document: Document): Manga18ScanContext {
+  if (
+    !scanContext ||
+    scanContext.document !== document ||
+    scanContext.scripts.some((script) => !script.isConnected) ||
+    scanContext.indexedImages.some((image) => !image.isConnected)
+  ) {
+    prepareManga18Scan(document);
   }
-
-  return Array.from(roots).flatMap((root) =>
-    Array.from(root.querySelectorAll<HTMLImageElement>("img"))
-  );
+  return scanContext!;
 }
 
 function resolveIndexedSlideSource(
   image: HTMLImageElement,
-  slideSources: ReadonlyArray<string>
+  context: Manga18ScanContext
 ): string | null {
-  const indexedImages = collectIndexedChapterImages(document);
-  const imageIndex = indexedImages.indexOf(image);
+  const imageIndex = context.indexedImages.indexOf(image);
   if (imageIndex < 0) {
     return null;
   }
 
   // 部分模板会先插入占位图再由脚本延迟换源；按阅读容器顺序回填，仍然受 slides_p_path 数量约束。
-  return slideSources[imageIndex] ?? null;
+  return context.slideSources[imageIndex] ?? null;
 }
 
 function resolveChapterImageSource(image: HTMLImageElement): string | null {
-  const slideSources = readSlideImageSources(document);
-  if (slideSources.length === 0) {
+  const context = getScanContext(document);
+  if (context.slideSources.length === 0) {
     return null;
   }
 
   const directSource = resolveDirectImageSource(image);
-  if (directSource && slideSources.includes(directSource)) {
+  if (directSource && context.slideSourceSet.has(directSource)) {
     return directSource;
   }
 
@@ -166,7 +191,7 @@ function resolveChapterImageSource(image: HTMLImageElement): string | null {
     return null;
   }
 
-  return resolveIndexedSlideSource(image, slideSources);
+  return resolveIndexedSlideSource(image, context);
 }
 
 export const manga18SiteAdapter: SiteAdapterDefinition = {
@@ -177,6 +202,7 @@ export const manga18SiteAdapter: SiteAdapterDefinition = {
   defaultEnabled: true,
   matches: isChapterPage,
   getRootSelectors: () => ROOT_SELECTORS,
+  prepareScan: prepareManga18Scan,
   isImageCandidate: (image) => resolveChapterImageSource(image) !== null,
   resolveImageSource: resolveChapterImageSource
 };

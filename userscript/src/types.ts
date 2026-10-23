@@ -105,6 +105,37 @@ export type ViewStatus =
   | "pending"
   | "idle";
 
+/** Browser-side preparation stage before a source enters the translation queue. */
+export type ImagePreparationStage =
+  | "discovered"
+  | "waiting-load"
+  | "reading-source"
+  | "hashing"
+  | "ready"
+  | "error"
+  | null;
+
+/** Concrete browser path currently used to obtain the source image bytes. */
+export type ImageSourceMethod = "direct" | "fetch" | "gm" | "pixels";
+
+/** Throttled download state displayed while an original image is being read. */
+export interface ImageSourceProgress {
+  stage: "starting" | "downloading" | "retrying" | "pixels";
+  method: ImageSourceMethod | null;
+  loadedBytes: number;
+  totalBytes: number | null;
+  elapsedMs: number;
+  attempt: 1 | 2;
+}
+
+/** Synchronous summary returned by every explicit or automatic discovery scan. */
+export interface ImageScanReport {
+  inspected: number;
+  candidates: number;
+  added: number;
+  waitingForLoad: number;
+}
+
 export interface QueueStats {
   queued: number;
   running: number;
@@ -113,6 +144,19 @@ export interface QueueStats {
   ignored: number;
 }
 
+/** User-facing aggregate state for the continuously observed translation session. */
+export interface TranslationSessionState {
+  enabled: boolean;
+  listening: boolean;
+  reading: number;
+  queued: number;
+  processing: number;
+  completed: number;
+  errors: number;
+  total: number;
+}
+
+/** Render-only state for one compact image overlay. */
 export interface OverlayViewModel {
   id: string;
   image: HTMLImageElement;
@@ -122,8 +166,11 @@ export interface OverlayViewModel {
   showOriginal: boolean;
   queuePosition: string | null;
   canRetry: boolean;
+  canRetryWithPixels: boolean;
   canCancel: boolean;
   canIgnore: boolean;
+  preparationStage: ImagePreparationStage;
+  sourceProgress: ImageSourceProgress | null;
 }
 
 export interface TranslationEvent {

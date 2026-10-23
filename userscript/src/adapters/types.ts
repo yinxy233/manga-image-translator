@@ -11,6 +11,8 @@ export interface SiteAdapterDefinition {
   defaultEnabled: boolean;
   matches(location: LocationLike): boolean;
   getRootSelectors(): string[];
+  /** Refresh any page-wide lookup data once before an image discovery pass. */
+  prepareScan?(document: Document): void;
   isImageCandidate(image: HTMLImageElement): boolean;
   resolveImageSource(image: HTMLImageElement): string | null;
   installDomTweaks?(document: Document): void | (() => void);

@@ -6,13 +6,23 @@ This directory contains a standalone Tampermonkey userscript project for connect
 
 ## Features
 
-- 手动启动当前页面翻译，之后自动追踪懒加载图片
+- 手动启动后立即反馈扫描结果，并持续追踪新增图片、懒加载属性与 `<picture>` 换源
 - 译图直接替换原图，同时保留图片角上的状态卡与原图切换
 - 支持通用兜底 + 可扩展站点适配器，可按站点控制候选图片区范围
 - 支持远程 `serverBaseUrl + apiKey`
-- 优先使用浏览器 `fetch`，失败时自动回退到 `GM_xmlhttpRequest`
+- 原图按来源自动选路：同源优先 `fetch`，跨域优先 `GM_xmlhttpRequest`，失败后再尝试另一条网络路径与受内存保护的页面像素兜底
+- 原图读取显示字节进度，支持取消、超时和一次自动重试；长图使用页面像素前会明确提示内存风险
 - 支持本地持久化结果缓存，可在设置中关闭
 - 支持单图取消、重试、忽略，全局原图/译图切换
+
+## 1.5.1：扫描反馈与慢图处理
+
+- 点击“译”后直接显示已发现的图片和实际扫描数量，无需等原图下载、哈希计算或翻译完成。
+- 同一轮扫描合并更新图片状态；读取槽位被占用时不再反复遍历待处理图片，减少长章节的同步工作量。
+- 普通情况下同时读取一张原图。连续 3 秒没有字节进度时，允许另一张当前可见图片先读取，同时最多读取两张，避免长图占用过多内存。
+- 原图读取提供字节进度、取消、失败重试和超时反馈。单条网络路径的首包等待为 10 秒、无进度等待为 15 秒、总时限为 120 秒；切换路径和一次自动重试会使整次读取耗时更长。
+
+安装构建产物时确认 Tampermonkey 中的版本为 **1.5.1**，然后刷新已打开的漫画页面。新提示会显示“已发现 N 张”；旧页面仍可能保留旧版脚本的执行实例。
 
 ## Build
 
@@ -127,6 +137,7 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8001/queue-si
 - `uploadTransport`
 - `streamEndpoint`
 - `autoTranslateEnabled`
+- `fullPageTranslateEnabled`
 - `cacheEnabled`
 - `performanceDiagnostics`
 - `maxConcurrency`
@@ -189,7 +200,7 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8001/queue-si
 ## HTTPS / HTTP Compatibility
 
 - 如果页面是 `https://`，而你的翻译服务是 `http://`，普通浏览器 `fetch` 可能被 mixed content 策略阻止。
-- 脚本会优先尝试 `fetch`，失败后自动回退到 Tampermonkey 的 `GM_xmlhttpRequest`。
+- 翻译服务请求仍保留 `fetch` 到 `GM_xmlhttpRequest` 的兼容回退；网页原图则按同源/跨域自动选择最快路径。
 - 在 iOS Safari + Stay 这类不支持 `GM_xmlhttpRequest` 流式响应的环境里，脚本会进一步退回到非流式图片接口。这样通常还能拿到最终结果，但不会显示完整的逐步进度。
 - 即便如此，公网部署仍然强烈建议使用 HTTPS 反向代理，例如 Nginx、Caddy 或 Cloudflare Tunnel。
 
@@ -201,17 +212,17 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8001/queue-si
   - 先确认服务端是否真的能处理该语言/翻译器组合，再检查服务器日志。
 - `GM stream transport is unavailable in this browser`
   - 在最新版脚本里会自动切到兼容模式；如果仍失败，优先检查 Stay 版本、服务端 HTTPS 配置和跨域设置。
-- `Failed to fetch the source image`
-  - 目标站点可能有更严格的防盗链策略，优先尝试登录后再刷新页面。
+- `无法读取原始图片`
+  - 脚本已尝试页面权限内的两条网络路径；目标图床仍可能要求页面 Cookie、Referer 或一次性签名。可先检查网络并手动重试，大型长图还可按提示选择“使用页面像素重试”。
 - `服务器返回 401`
   - 公开接口已开启鉴权，但脚本未带上正确的 `X-API-Key`。
 
 ## Development Notes
 
 - 油猴脚本是独立工程，不复用 `front/` 运行时。
-- 当前版本只面向桌面 Tampermonkey，不覆盖移动端浏览器。
+- 浮层兼容桌面和粗指针设备；普通 `<img>/<picture>` 之外的 canvas、CSS 背景图、跨域 iframe 与 Shadow DOM 媒体不在自动发现范围内。
 - 会默认缓存已完成的翻译结果；如果站点图片经常变化或你不希望复用旧结果，可以在设置里关闭缓存。
-- 当前版本支持 `generic` 通用兜底适配器和站点特化适配器，内置站点包括 `mamekichimameko.blog.jp` 与 `manhwa-raw.com`。
+- 当前版本支持 `generic` 通用兜底适配器和站点特化适配器，内置站点包括 `mamekichimameko.blog.jp`、`manga18.club` 与 `manhwa-raw.com`。
 - 新增站点适配器时，最少需要：
   - 在 `src/adapters/` 注册 `SiteAdapterDefinition`
   - 声明正文 root selectors

@@ -13,6 +13,9 @@ declare global {
     responseHeaders?: string;
     response?: T;
     responseText?: string;
+    loaded?: number;
+    total?: number;
+    lengthComputable?: boolean;
   }
 
   interface GMRequestDetails<T = unknown> {
