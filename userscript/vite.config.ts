@@ -3,8 +3,9 @@ import monkey from "vite-plugin-monkey"
 
 import { resolveUserscriptMatches, USERSCRIPT_MATCH_ENV_KEY } from "./src/userscriptMatches"
 
-// Stable release URLs allow installed scripts to follow later published versions.
-const releaseAssetBaseUrl = "https://github.com/yinxy233/manga-image-translator/releases/latest/download"
+// Keep fork identity and release URLs together so metadata cannot drift upstream.
+const repositoryUrl = "https://github.com/yinxy233/manga-image-translator"
+const releaseAssetBaseUrl = `${repositoryUrl}/releases/latest/download`
 const userscriptFileName = "manga-image-translator-userscript.user.js"
 
 export default defineConfig(({ mode }) => {
@@ -19,10 +20,12 @@ export default defineConfig(({ mode }) => {
         build: { fileName: userscriptFileName, metaFileName: true },
         userscript: {
           name: "Manga Image Translator Overlay",
-          namespace: "https://github.com/zyddnys/manga-image-translator",
+          namespace: repositoryUrl,
           description:
             "Batch translate visible manga images with a remote manga-image-translator server.",
-          author: "OpenAI Codex",
+          author: "yinxy233",
+          homepageURL: repositoryUrl,
+          supportURL: `${repositoryUrl}/issues`,
           updateURL: `${releaseAssetBaseUrl}/${userscriptFileName.replace(/\.user\.js$/, ".meta.js")}`,
           downloadURL: `${releaseAssetBaseUrl}/${userscriptFileName}`,
           match: resolveUserscriptMatches(userscriptMatchEnvValue),
