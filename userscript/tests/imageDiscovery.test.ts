@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { manga18SiteAdapter } from "../src/adapters/manga18";
 import { manhwaRawSiteAdapter } from "../src/adapters/manhwaRaw";
+import { mamekichimamekoSiteAdapter } from "../src/adapters/mamekichimameko";
 import type { SiteAdapterDefinition } from "../src/adapters/types";
 import { ImageDiscovery } from "../src/core/imageDiscovery";
 import { resolveDefaultImageSource } from "../src/utils/image";
@@ -40,6 +41,79 @@ describe("ImageDiscovery", () => {
   beforeEach(() => {
     document.body.innerHTML = "";
     FakeIntersectionObserver.instance = null;
+  });
+
+  it.each([
+    ["livedoor.sp.blogimg.jp", "1066297c.png", "1066297c.png"],
+    ["livedoor.blogimg.jp", "1066297c.png", "1066297c.png"],
+    ["livedoor.sp.blogimg.jp", "8b7ceef5.png", "8b7ceef5-s.png"]
+  ])("prepares a loaded mameko preview from %s (%s → %s)", (host, previewName, originalName) => {
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+    // Reduced from the live iPhone article: the preview and original are on
+    // different hosts, so currentSrc can never equal the translation URL.
+    document.body.innerHTML = `
+      <div id="article-contents" class="article-body">
+        <a href="https://livedoor.blogimg.jp/mamekichimameko/imgs/1/0/${originalName}"></a>
+      </div>
+    `;
+    const image = createLoadedImage(`https://${host}/mamekichimameko/imgs/1/0/${previewName}`);
+    document.querySelector("a")?.append(image);
+    const eligible = vi.fn();
+    const discovery = new ImageDiscovery({
+      adapters: [mamekichimamekoSiteAdapter],
+      eagerScanEnabled: true,
+      onImageEligible: eligible
+    });
+
+    const report = discovery.start();
+    discovery.rescan();
+    image.dispatchEvent(new Event("load"));
+    discovery.stop();
+
+    expect(report.waitingForLoad).toBe(0);
+    expect(eligible).toHaveBeenCalledOnce();
+    expect(eligible).toHaveBeenCalledWith(expect.objectContaining({
+      sourceUrl: `https://livedoor.blogimg.jp/mamekichimameko/imgs/1/0/${originalName}`,
+      readyForPreparation: true
+    }));
+  });
+
+  it("waits for a lazy mobile preview, then advances it on load", () => {
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+    const original = "https://livedoor.blogimg.jp/mamekichimameko/imgs/1/0/1066297c.png";
+    const preview = original.replace("livedoor.blogimg.jp", "livedoor.sp.blogimg.jp");
+    document.body.innerHTML = `<div id="article-contents" class="article-body"><a href="${original}"></a></div>`;
+    const image = createLoadedImage("https://example.com/loading.png");
+    image.setAttribute("data-src", preview);
+    document.querySelector("a")?.append(image);
+    const eligible = vi.fn();
+    const discovery = new ImageDiscovery({
+      adapters: [mamekichimamekoSiteAdapter], eagerScanEnabled: true, onImageEligible: eligible
+    });
+    expect(discovery.start().waitingForLoad).toBe(1);
+    expect(eligible).toHaveBeenLastCalledWith(expect.objectContaining({ readyForPreparation: false }));
+
+    Object.defineProperty(image, "currentSrc", { configurable: true, value: preview });
+    image.dispatchEvent(new Event("load"));
+    expect(eligible).toHaveBeenLastCalledWith(expect.objectContaining({
+      sourceUrl: original, readyForPreparation: true
+    }));
+    discovery.stop();
+  });
+
+  it.each([
+    "https://livedoor.sp.blogimg.jp/mamekichimameko/imgs/1/0/another-image.png",
+    "https://other.example/mamekichimameko/imgs/1/0/1066297c.png"
+  ])("does not accept an unrelated loaded preview: %s", (preview) => {
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+    document.body.innerHTML = `<div id="article-contents" class="article-body">
+      <a href="https://livedoor.blogimg.jp/mamekichimameko/imgs/1/0/1066297c.png"></a></div>`;
+    document.querySelector("a")?.append(createLoadedImage(preview));
+    const discovery = new ImageDiscovery({
+      adapters: [mamekichimamekoSiteAdapter], eagerScanEnabled: true, onImageEligible: vi.fn()
+    });
+    expect(discovery.start().waitingForLoad).toBe(1);
+    discovery.stop();
   });
 
   it("only emits images inside active adapter roots", () => {

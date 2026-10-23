@@ -105,6 +105,8 @@ PYTHON_SYMBOLS = {
 }
 
 TYPESCRIPT_SYMBOLS = {
+    "userscript/src/adapters/types.ts": ("SiteAdapterDefinition",),
+    "userscript/src/adapters/mamekichimameko.ts": ("mamekichimamekoSiteAdapter",),
     "front/app/types.ts": ("TranslatorKey", "validTranslators"),
     "userscript/src/cache.ts": (
         "TranslationCacheRecord",

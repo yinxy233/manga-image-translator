@@ -346,7 +346,10 @@ export class ImageDiscovery {
       image.complete &&
       image.naturalWidth > 0 &&
       image.naturalHeight > 0 &&
-      isImageDisplayingSource(image, sourceUrl)
+      // Some sites display a mobile preview while the adapter intentionally
+      // downloads its linked original. Waiting for currentSrc to become that
+      // original would never finish; only the site adapter may confirm a pair.
+      (isImageDisplayingSource(image, sourceUrl) || adapter.isLoadedPreviewForSource?.(image, sourceUrl))
     );
     if (readyForPreparation && !isEligibleRasterImage(image, sourceUrl)) {
       if (previous?.key !== key) {

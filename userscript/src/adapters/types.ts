@@ -3,6 +3,7 @@ export interface LocationLike {
   pathname: string;
 }
 
+/** Site-specific discovery rules and explicit preview-to-original relationships. */
 export interface SiteAdapterDefinition {
   id: string;
   label: string;
@@ -15,6 +16,8 @@ export interface SiteAdapterDefinition {
   prepareScan?(document: Document): void;
   isImageCandidate(image: HTMLImageElement): boolean;
   resolveImageSource(image: HTMLImageElement): string | null;
+  /** Accept a loaded site preview for an original URL; never authorizes pixel fallback. */
+  isLoadedPreviewForSource?(image: HTMLImageElement, sourceUrl: string): boolean;
   installDomTweaks?(document: Document): void | (() => void);
 }
 

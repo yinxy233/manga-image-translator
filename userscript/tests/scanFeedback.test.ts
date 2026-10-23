@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_SETTINGS } from "../src/config";
+import * as siteAdapters from "../src/adapters";
+import { mamekichimamekoSiteAdapter } from "../src/adapters/mamekichimameko";
 import { TranslatorController } from "../src/core/controller";
 import type { ImageSourceLoadRequest } from "../src/core/imageSourceLoader";
 import type { OverlayManagerCallbacks } from "../src/core/overlayManager";
@@ -107,6 +109,32 @@ describe("translate button scan feedback", () => {
     await vi.advanceTimersByTimeAsync(0);
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("starts reading the original when a mobile article preview has already loaded", async () => {
+    // Keep the real adapter and discovery/controller chain; only select the
+    // article adapter because the test document uses a local origin.
+    vi.spyOn(siteAdapters, "resolveActiveSiteAdapters").mockReturnValue([mamekichimamekoSiteAdapter]);
+    const original = "https://livedoor.blogimg.jp/mamekichimameko/imgs/1/0/1066297c.png";
+    const image = appendImage(0);
+    image.src = original.replace("livedoor.blogimg.jp", "livedoor.sp.blogimg.jp");
+    const root = document.createElement("div");
+    root.id = "article-contents";
+    root.className = "article-body";
+    const link = document.createElement("a");
+    link.href = original;
+    link.append(image);
+    root.append(link);
+    document.body.append(root);
+    controller = new TranslatorController() as unknown as RuntimeCleanup;
+
+    mocks.actions!.onTranslateNow();
+    await Promise.resolve();
+
+    expect(mocks.load).toHaveBeenCalledOnce();
+    expect(mocks.load).toHaveBeenCalledWith(expect.objectContaining({ sourceUrl: original, image }));
+    expect(mocks.render.mock.lastCall?.[0][0].message).not.toBe("等待网页图片加载");
   });
 
   it("shows all discovered images in one update before any download completes", async () => {

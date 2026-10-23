@@ -1,4 +1,4 @@
-import { isRasterImageUrl, resolveDefaultImageSource } from "../utils/image";
+import { isImageDisplayingSource, isRasterImageUrl, resolveDefaultImageSource } from "../utils/image";
 import type { LocationLike, SiteAdapterDefinition } from "./types";
 
 const ARTICLE_PATH_PATTERN = /^\/archives\/\d+\.html$/;
@@ -56,6 +56,33 @@ function resolveOriginalAnchorSource(image: HTMLImageElement): string | null {
   }
 }
 
+/** Match a fully displayed Livedoor preview to its explicitly linked original. */
+function isLoadedPreviewForSource(image: HTMLImageElement, sourceUrl: string): boolean {
+  const previewSource = resolveDefaultImageSource(image);
+  if (
+    !previewSource ||
+    !isImageDisplayingSource(image, previewSource) ||
+    resolveOriginalAnchorSource(image) !== sourceUrl
+  ) {
+    return false;
+  }
+
+  try {
+    const preview = new URL(previewSource, window.location.href);
+    const original = new URL(sourceUrl, window.location.href);
+    if (preview.hostname !== ORIGINAL_IMAGE_HOST && preview.hostname !== "livedoor.sp.blogimg.jp") {
+      return false;
+    }
+    // Mobile templates use a different image host; Livedoor thumbnails may
+    // additionally carry -s before the extension (including article notices).
+    // Compare image identity, not arbitrary loaded placeholders or other links.
+    return preview.pathname.replace(/-s(?=\.[^.]+$)/, "") ===
+      original.pathname.replace(/-s(?=\.[^.]+$)/, "");
+  } catch {
+    return false;
+  }
+}
+
 function installAdCleanupStyle(document: Document): () => void {
   const existingStyle = document.head?.querySelector<HTMLStyleElement>(
     `style[${DOM_TWEAK_STYLE_ATTR}="mamekichimameko"]`
@@ -77,6 +104,7 @@ function installAdCleanupStyle(document: Document): () => void {
   };
 }
 
+/** Discover desktop/mobile article images while downloading linked originals. */
 export const mamekichimamekoSiteAdapter: SiteAdapterDefinition = {
   id: "mamekichimameko",
   label: "まめきちまめこ",
@@ -90,5 +118,6 @@ export const mamekichimamekoSiteAdapter: SiteAdapterDefinition = {
     // 移动模板会把缩略图包在原图链接里，优先回退到原图地址以避免翻译低清版本。
     return resolveOriginalAnchorSource(image) ?? resolveDefaultImageSource(image);
   },
+  isLoadedPreviewForSource,
   installDomTweaks: installAdCleanupStyle
 };
