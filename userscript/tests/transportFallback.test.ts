@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_SETTINGS } from "../src/config";
 import { TransportClient } from "../src/utils/transport";
@@ -44,6 +44,100 @@ function createFastPathStreamResponse(folderName: string): ReadableStream<Uint8A
 }
 
 describe("TransportClient", () => {
+  beforeEach(() => vi.stubGlobal("GM_info", { scriptHandler: "Tampermonkey" }));
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each([
+    ["multipart", "Stay"], ["base64-json", "Stay"],
+    ["multipart", undefined], ["base64-json", undefined]
+  ] as const)(
+    "reads a buffered %s response with manager %s without resubmitting",
+    async (uploadTransport, scriptHandler) => {
+      vi.stubGlobal("GM_info", scriptHandler ? { scriptHandler } : undefined);
+      const fetchImpl = vi.fn(async () => { throw new TypeError("Failed to fetch"); });
+      // Reproduce engines that accept the POST but cannot expose a stream.
+      // Requesting binary data explicitly must preserve the original bytes.
+      const gmRequest = vi.fn((details: GMRequestDetails<unknown>) => {
+        queueMicrotask(() => {
+          details.onloadstart?.({ status: 200 });
+          details.onload?.({
+            status: 200,
+            response: details.responseType === "arraybuffer"
+              ? createFrame(0, PNG_BYTES).buffer
+              : undefined
+          });
+        });
+        return { abort: vi.fn() };
+      });
+      const transport = new TransportClient({ fetchImpl, gmRequest });
+
+      const result = await transport.translateImage({
+        imageBlob: createPngBlob(),
+        fileName: "page.png",
+        settings: { ...STANDARD_SETTINGS, uploadTransport },
+        onEvent: vi.fn()
+      });
+
+      expect(result.type).toBe("image/png");
+      expect(result.size).toBe(PNG_BYTES.length);
+      expect(gmRequest).toHaveBeenCalledTimes(1);
+      expect(gmRequest.mock.calls[0][0].responseType).toBe("arraybuffer");
+    }
+  );
+
+  it.each(["multipart", "base64-json"] as const)(
+    "resolves the buffered Stay %s fast path through a result GET",
+    async (uploadTransport) => {
+      vi.stubGlobal("GM_info", { scriptHandler: "Stay" });
+      const fetchImpl = vi.fn(async () => { throw new TypeError("Failed to fetch"); });
+      const gmRequest = vi.fn((details: GMRequestDetails<unknown>) => {
+        queueMicrotask(() => {
+          details.onload?.({
+            status: 200,
+            response: details.method === "GET"
+              ? createPngBlob()
+              : createFrame(1, new TextEncoder().encode("final_ready:folder 1")).buffer
+          });
+        });
+        return { abort: vi.fn() };
+      });
+      const transport = new TransportClient({ fetchImpl, gmRequest });
+      const onEvent = vi.fn();
+
+      const result = await transport.translateImage({
+        imageBlob: createPngBlob(), fileName: "page.png",
+        settings: { ...STANDARD_SETTINGS, uploadTransport, streamEndpoint: "web-fast" },
+        onEvent
+      });
+
+      expect(result.size).toBe(PNG_BYTES.length);
+      expect(gmRequest.mock.calls.map(([request]) => request.method)).toEqual(["POST", "GET"]);
+      expect(gmRequest.mock.calls[0][0].responseType).toBe("arraybuffer");
+      expect(String(gmRequest.mock.calls[1][0].url)).toContain("/result/folder%201/final.png");
+      expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ text: "兼容模式：等待完整结果" }));
+    }
+  );
+
+  it.each(["multipart", "base64-json"] as const)(
+    "does not resubmit an unreadable accepted GM %s response",
+    async (uploadTransport) => {
+      vi.stubGlobal("GM_info", { scriptHandler: "Stay" });
+      const fetchImpl = vi.fn(async () => { throw new TypeError("Failed to fetch"); });
+      const gmRequest = vi.fn((details: GMRequestDetails<unknown>) => {
+        queueMicrotask(() => details.onload?.({ status: 200 }));
+        return { abort: vi.fn() };
+      });
+      const transport = new TransportClient({ fetchImpl, gmRequest });
+
+      await expect(transport.translateImage({
+        imageBlob: createPngBlob(), fileName: "page.png",
+        settings: { ...STANDARD_SETTINGS, uploadTransport }, onEvent: vi.fn()
+      })).rejects.toThrow("Accepted GM translation did not expose a readable response body.");
+
+      expect(gmRequest).toHaveBeenCalledTimes(1);
+    }
+  );
+
   it("falls back to GM transport when fetch upload fails", async () => {
     const fetchImpl = vi.fn(async () => {
       throw new TypeError("Failed to fetch");

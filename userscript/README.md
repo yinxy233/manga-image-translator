@@ -15,6 +15,13 @@ This directory contains a standalone Tampermonkey userscript project for connect
 - 支持本地持久化结果缓存，可在设置中关闭
 - 支持单图取消、重试、忽略，全局原图/译图切换
 
+## 1.5.2：Stay 响应读取兼容修复
+
+- GM 翻译请求会在提交前选择响应格式：Tampermonkey 保留流式读取，Stay 与未识别的脚本管理器使用 `arraybuffer`，等完整响应到达后解析。
+- 修复请求已被受理后出现 `Accepted GM translation did not expose a readable response body.` 的兼容性问题；multipart 与 base64 JSON 上传均适用。
+- 保留标准流协议和 Web 快路径的 `final_ready` 结果下载，不会为了切换响应格式重复提交已受理的翻译任务。兼容模式等待期间不显示实时翻译阶段进度。
+- 增加固定的在线更新地址和 `.meta.js` 更新检测附件。在 Stay 中通过[在线安装地址](https://github.com/yinxy233/manga-image-translator/releases/latest/download/manga-image-translator-userscript.user.js)覆盖安装，确认版本为 **1.5.2**，再刷新 Safari 漫画页。无需调整运行时机或注入方式。
+
 ## 1.5.1：扫描反馈与慢图处理
 
 - 点击“译”后直接显示已发现的图片和实际扫描数量，无需等原图下载、哈希计算或翻译完成。
@@ -22,7 +29,7 @@ This directory contains a standalone Tampermonkey userscript project for connect
 - 普通情况下同时读取一张原图。连续 3 秒没有字节进度时，允许另一张当前可见图片先读取，同时最多读取两张，避免长图占用过多内存。
 - 原图读取提供字节进度、取消、失败重试和超时反馈。单条网络路径的首包等待为 10 秒、无进度等待为 15 秒、总时限为 120 秒；切换路径和一次自动重试会使整次读取耗时更长。
 
-安装构建产物时确认 Tampermonkey 中的版本为 **1.5.1**，然后刷新已打开的漫画页面。新提示会显示“已发现 N 张”；旧页面仍可能保留旧版脚本的执行实例。
+安装构建产物时确认脚本管理器中的版本为 **1.5.2**，然后刷新已打开的漫画页面。新提示会显示“已发现 N 张”；旧页面仍可能保留旧版脚本的执行实例。
 
 ## Build
 
@@ -67,7 +74,15 @@ pnpm release:major
 - `minor`: 向后兼容的新功能，例如 `0.1.0 -> 0.2.0`
 - `major`: 不兼容变更，例如 `0.1.0 -> 1.0.0`
 
-这些命令会先更新 [package.json](./package.json) 里的 `version`，再执行打包，因此 userscript 头部的 `@version` 会同步更新。
+这些命令会先更新 [package.json](./package.json) 里的 `version`，再执行打包，因此 userscript 头部的 `@version` 会同步更新。它们不会创建线上发行版，不能单独作为交付完成的依据。
+
+### 发布要求
+
+Userscript 更新必须发布到本仓库的 [GitHub Releases](https://github.com/yinxy233/manga-image-translator/releases)，并上传同一构建生成的 `.user.js` 与 `.meta.js`。发布前运行 `pnpm check`，按上一版发行附件的 `@match` 范围构建，核对版本、语法及更新链接；提交源码后以相同版本标签发布，并设为 Latest。发布后下载线上附件，核对版本与 SHA-256。
+
+- [固定安装地址](https://github.com/yinxy233/manga-image-translator/releases/latest/download/manga-image-translator-userscript.user.js)对应 `@downloadURL`。
+- [固定更新检测地址](https://github.com/yinxy233/manga-image-translator/releases/latest/download/manga-image-translator-userscript.meta.js)对应 `@updateURL`。
+- 旧版若从本地文件或固定版本链接安装，且没有更新地址，需要先用固定安装地址覆盖安装一次；之后可由脚本管理器检测后续发行版。
 
 ## Server Setup
 
@@ -201,7 +216,7 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8001/queue-si
 
 - 如果页面是 `https://`，而你的翻译服务是 `http://`，普通浏览器 `fetch` 可能被 mixed content 策略阻止。
 - 翻译服务请求仍保留 `fetch` 到 `GM_xmlhttpRequest` 的兼容回退；网页原图则按同源/跨域自动选择最快路径。
-- 在 iOS Safari + Stay 这类不支持 `GM_xmlhttpRequest` 流式响应的环境里，脚本会进一步退回到非流式图片接口。这样通常还能拿到最终结果，但不会显示完整的逐步进度。
+- GM 请求仅在已识别为 Tampermonkey 时启用 `stream`；Safari + Stay 与未识别的管理器预先选择 `arraybuffer`，通过同一个请求读取完整的流协议响应，不会显示实时逐步进度。页面原生 `fetch` 成功时仍使用实时流。
 - 即便如此，公网部署仍然强烈建议使用 HTTPS 反向代理，例如 Nginx、Caddy 或 Cloudflare Tunnel。
 
 ## Troubleshooting
@@ -210,8 +225,8 @@ curl -H 'X-API-Key: replace-with-a-strong-secret' http://127.0.0.1:8001/queue-si
   - 检查脚本设置里的 `apiKey` 是否与服务端一致。
 - `连接成功但图片不翻译`
   - 先确认服务端是否真的能处理该语言/翻译器组合，再检查服务器日志。
-- `GM stream transport is unavailable in this browser`
-  - 在最新版脚本里会自动切到兼容模式；如果仍失败，优先检查 Stay 版本、服务端 HTTPS 配置和跨域设置。
+- `Accepted GM translation did not expose a readable response body.`
+  - 1.5.1 会对所有管理器请求 `stream`，有些管理器接受请求却无法返回可读的流或二进制对象。升级至 1.5.2 并刷新页面，让兼容格式在提交前生效。已受理的请求不会自动重新提交，避免重复翻译。
 - `无法读取原始图片`
   - 脚本已尝试页面权限内的两条网络路径；目标图床仍可能要求页面 Cookie、Referer 或一次性签名。可先检查网络并手动重试，大型长图还可按提示选择“使用页面像素重试”。
 - `服务器返回 401`

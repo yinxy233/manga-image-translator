@@ -1,6 +1,9 @@
 export {};
 
 declare global {
+  /** Manager identity used to avoid unsupported GM response formats. */
+  const GM_info: { scriptHandler?: string } | undefined;
+
   interface GMRequestHandle {
     abort: () => void;
   }

@@ -73,6 +73,16 @@ function getGMRequest(gmRequest?: GMRequestFn): GMRequestFn {
   throw new Error("GM_xmlhttpRequest is unavailable in this userscript environment.");
 }
 
+/** Select a supported response format before submitting a costly translation. */
+function getGMTranslationResponseType(): "stream" | "arraybuffer" {
+  // ReadableStream in the page does not imply GM streaming support. Only use
+  // Tampermonkey's documented stream API; Stay and unknown managers receive
+  // the same framed protocol as bytes on load, without a second translation.
+  return typeof GM_info !== "undefined" && GM_info?.scriptHandler === "Tampermonkey"
+    ? "stream"
+    : "arraybuffer";
+}
+
 function joinServerUrl(baseUrl: string, path: string): string {
   return new URL(path, `${baseUrl.replace(/\/+$/, "")}/`).toString();
 }
@@ -580,6 +590,10 @@ export class TransportClient {
     options: TranslateImageOptions,
     jsonPayload: string
   ): Promise<Blob> {
+    const responseType = getGMTranslationResponseType();
+    if (responseType === "arraybuffer") {
+      options.onEvent({ code: 1, payload: new Uint8Array(), text: "兼容模式：等待完整结果" });
+    }
     return new Promise<Blob>((resolve, reject) => {
       let headersReceived = false;
       let streamParsingStarted = false;
@@ -589,7 +603,7 @@ export class TransportClient {
         url: joinServerUrl(options.settings.serverBaseUrl, getJsonStreamPath(options.settings)),
         headers: buildJsonHeaders(options.settings),
         data: jsonPayload,
-        responseType: "stream",
+        responseType,
         fetch: true,
         onloadstart: async (response) => {
           headersReceived = response.status >= 200;
@@ -737,6 +751,10 @@ export class TransportClient {
   }
 
   private async translateImageWithGMStream(options: TranslateImageOptions): Promise<Blob> {
+    const responseType = getGMTranslationResponseType();
+    if (responseType === "arraybuffer") {
+      options.onEvent({ code: 1, payload: new Uint8Array(), text: "兼容模式：等待完整结果" });
+    }
     return new Promise<Blob>((resolve, reject) => {
       void (async () => {
         const multipartPayload = await createGMTranslationPayload(
@@ -752,7 +770,7 @@ export class TransportClient {
           url: joinServerUrl(options.settings.serverBaseUrl, getMultipartStreamPath(options.settings)),
           headers: multipartPayload.headers,
           data: multipartPayload.data,
-          responseType: "stream",
+          responseType,
           fetch: true,
           onloadstart: async (response) => {
             headersReceived = response.status >= 200;
